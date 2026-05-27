@@ -21,6 +21,11 @@ public class CalculatorManager
     {
         return handler.Calculate(a, b);
     }
+
+    public static float HandleCalculateStatic(ICalculator handler, float a, float b)
+    {
+        return handler.Calculate(a, b) * 2;
+    }
 }
 
 public class DuckTypingTests
@@ -36,5 +41,17 @@ public class DuckTypingTests
         var result = manager.HandleCalculate(handler, 2, 3);
 
         Assert.Equal(5f, result);
+    }
+
+    [Fact]
+    public void CanDuckTypeAddCalculatorToICalculatorUsingStaticMethod()
+    {
+        var handler = new AddCalculator();
+
+        // This method does not exist natively on CalculatorManager that takes AddCalculator
+        // The source generator will create an extension method to handle it.
+        var result = CalculatorManager.HandleCalculateStatic(handler, 2, 3);
+
+        Assert.Equal(10f, result);
     }
 }

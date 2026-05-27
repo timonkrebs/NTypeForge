@@ -48,19 +48,9 @@ namespace NTypeForge.SourceGenerator
         // Check if any candidate failed because of an argument type mismatch where duck typing could help
         foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
         {
-            // We only support generating extensions for instance methods or static methods
-            // Find the receiver type
-            ITypeSymbol? targetType = null;
-            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
-            {
-                var receiverInfo = semanticModel.GetTypeInfo(memberAccess.Expression);
-                targetType = receiverInfo.Type;
-            }
-            else if (invocation.Expression is IdentifierNameSyntax)
-            {
-                // Implicit this
-                targetType = semanticModel.GetEnclosingSymbol(invocation.SpanStart)?.ContainingType;
-            }
+            // We support generating extensions for instance methods or static methods
+            // Find the receiver type: it's the class/struct defining the method.
+            ITypeSymbol? targetType = candidate.ContainingType;
 
             if (targetType == null) continue;
 
@@ -91,7 +81,8 @@ namespace NTypeForge.SourceGenerator
                             argType,
                             paramType,
                             i,
-                            candidate
+                            candidate,
+                            candidate.IsStatic
                         );
                     }
                 }
@@ -106,18 +97,30 @@ namespace NTypeForge.SourceGenerator
             if (candidates.IsDefaultOrEmpty)
                 return;
 
-            var generatedHints = new System.Collections.Generic.HashSet<string>();
-
-            foreach (var candidate in candidates)
+            // Group by the target type to avoid duplicate class names
+            foreach (var group in candidates.GroupBy(c => c.TargetType, SymbolEqualityComparer.Default))
             {
-                var matchResult = CheckStructuralMatch(candidate.ArgumentType, candidate.ExpectedInterfaceType);
-                if (matchResult.IsMatch)
+                var targetType = (ITypeSymbol)group.Key!;
+                var extensionsToGenerate = new System.Collections.Generic.List<(CandidateInvocation candidate, StructuralMatchResult matchResult)>();
+                var generatedHints = new System.Collections.Generic.HashSet<string>();
+
+                foreach (var candidate in group)
                 {
-                    var hintName = $"{candidate.TargetType.Name}_{candidate.OriginalMethod.Name}_{candidate.ArgumentType.Name}_DuckTyping.g.cs";
-                    if (generatedHints.Add(hintName))
+                    var matchResult = CheckStructuralMatch(candidate.ArgumentType, candidate.ExpectedInterfaceType);
+                    if (matchResult.IsMatch)
                     {
-                        GenerateProxyAndExtension(context, candidate, matchResult, hintName);
+                        // Ensure we don't generate the same extension method multiple times
+                        var methodHint = $"{candidate.OriginalMethod.Name}_{candidate.ArgumentType.Name}";
+                        if (generatedHints.Add(methodHint))
+                        {
+                            extensionsToGenerate.Add((candidate, matchResult));
+                        }
                     }
+                }
+
+                if (extensionsToGenerate.Count > 0)
+                {
+                    GenerateProxyAndExtension(context, targetType, extensionsToGenerate);
                 }
             }
         }
@@ -162,17 +165,11 @@ namespace NTypeForge.SourceGenerator
             return true;
         }
 
-        private static void GenerateProxyAndExtension(SourceProductionContext context, CandidateInvocation candidate, StructuralMatchResult matchResult, string hintName)
+        private static void GenerateProxyAndExtension(SourceProductionContext context, ITypeSymbol targetType, System.Collections.Generic.List<(CandidateInvocation candidate, StructuralMatchResult matchResult)> extensions)
         {
-            var sourceType = candidate.ArgumentType;
-            var interfaceType = candidate.ExpectedInterfaceType;
-            var targetType = candidate.TargetType;
-            var originalMethod = candidate.OriginalMethod;
-
-            var sourceTypeName = sourceType.Name;
-            var interfaceTypeName = interfaceType.Name;
-            var proxyStructName = $"{sourceTypeName}_{interfaceTypeName}_Proxy";
             var extensionClassName = $"{targetType.Name}_DuckTypingExtensions";
+            var targetNamespace = targetType.ContainingNamespace.IsGlobalNamespace ? "" : targetType.ContainingNamespace.ToDisplayString();
+            var targetFullName = targetType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 
             var sb = new System.Text.StringBuilder();
 
@@ -180,101 +177,130 @@ namespace NTypeForge.SourceGenerator
             sb.AppendLine("using System;");
             sb.AppendLine();
 
-            var targetNamespace = targetType.ContainingNamespace.IsGlobalNamespace ? "" : targetType.ContainingNamespace.ToDisplayString();
             if (!string.IsNullOrEmpty(targetNamespace))
             {
                 sb.AppendLine($"namespace {targetNamespace}");
                 sb.AppendLine("{");
             }
 
-            // Generate Proxy Struct
-            var interfaceFullName = interfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            var sourceFullName = sourceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+            // Generate Proxy Structs uniquely
+            var generatedProxies = new System.Collections.Generic.HashSet<string>();
 
-            sb.AppendLine($"    internal readonly struct {proxyStructName} : {interfaceFullName}");
-            sb.AppendLine("    {");
-            sb.AppendLine($"        private readonly {sourceFullName} _instance;");
-            sb.AppendLine();
-            sb.AppendLine($"        public {proxyStructName}({sourceFullName} instance)");
-            sb.AppendLine("        {");
-            sb.AppendLine("            _instance = instance;");
-            sb.AppendLine("        }");
-            sb.AppendLine();
-
-            foreach (var method in matchResult.MatchedMethods)
+            foreach (var item in extensions)
             {
-                var returnTypeStr = method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}"));
-                var argsStr = string.Join(", ", method.Parameters.Select(p => p.Name));
+                var sourceType = item.candidate.ArgumentType;
+                var interfaceType = item.candidate.ExpectedInterfaceType;
 
-                sb.AppendLine($"        public {returnTypeStr} {method.Name}({parametersStr})");
-                sb.AppendLine("        {");
-                if (method.ReturnType.SpecialType == SpecialType.System_Void)
-                {
-                    sb.AppendLine($"            _instance.{method.Name}({argsStr});");
-                }
-                else
-                {
-                    sb.AppendLine($"            return _instance.{method.Name}({argsStr});");
-                }
-                sb.AppendLine("        }");
-            }
-            sb.AppendLine("    }");
-            sb.AppendLine();
+                var sourceTypeName = sourceType.Name;
+                var interfaceTypeName = interfaceType.Name;
+                var proxyStructName = $"{sourceTypeName}_{interfaceTypeName}_Proxy";
 
-            // Generate Extension Method
-            var targetFullName = targetType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-
-            // Build parameters for the extension method
-            var extParams = new System.Collections.Generic.List<string>();
-            extParams.Add($"this {targetFullName} target");
-
-            for (int i = 0; i < originalMethod.Parameters.Length; i++)
-            {
-                var p = originalMethod.Parameters[i];
-                if (i == candidate.ArgumentIndex)
+                if (generatedProxies.Add(proxyStructName))
                 {
-                    extParams.Add($"{sourceFullName} {p.Name}");
-                }
-                else
-                {
-                    extParams.Add($"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}");
+                    var interfaceFullName = interfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                    var sourceFullName = sourceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+                    sb.AppendLine($"    internal readonly struct {proxyStructName} : {interfaceFullName}");
+                    sb.AppendLine("    {");
+                    sb.AppendLine($"        private readonly {sourceFullName} _instance;");
+                    sb.AppendLine();
+                    sb.AppendLine($"        public {proxyStructName}({sourceFullName} instance)");
+                    sb.AppendLine("        {");
+                    sb.AppendLine("            _instance = instance;");
+                    sb.AppendLine("        }");
+                    sb.AppendLine();
+
+                    foreach (var method in item.matchResult.MatchedMethods)
+                    {
+                        var returnTypeStr = method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                        var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}"));
+                        var argsStr = string.Join(", ", method.Parameters.Select(p => p.Name));
+
+                        sb.AppendLine($"        public {returnTypeStr} {method.Name}({parametersStr})");
+                        sb.AppendLine("        {");
+                        if (method.ReturnType.SpecialType == SpecialType.System_Void)
+                        {
+                            sb.AppendLine($"            _instance.{method.Name}({argsStr});");
+                        }
+                        else
+                        {
+                            sb.AppendLine($"            return _instance.{method.Name}({argsStr});");
+                        }
+                        sb.AppendLine("        }");
+                    }
+                    sb.AppendLine("    }");
+                    sb.AppendLine();
                 }
             }
 
-            var extParamsStr = string.Join(", ", extParams);
-            var extReturnTypeStr = originalMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-            var methodName = originalMethod.Name;
-
+            // Generate Extension Type
             sb.AppendLine($"    public static class {extensionClassName}");
             sb.AppendLine("    {");
-            sb.AppendLine($"        public static {extReturnTypeStr} {methodName}({extParamsStr})");
+            var receiverTargetName = "target";
+            sb.AppendLine($"        extension ({targetFullName} {receiverTargetName})");
             sb.AppendLine("        {");
 
-            // Build arguments for calling the original method
-            var callArgs = new System.Collections.Generic.List<string>();
-            for (int i = 0; i < originalMethod.Parameters.Length; i++)
+            foreach (var item in extensions)
             {
-                var p = originalMethod.Parameters[i];
-                if (i == candidate.ArgumentIndex)
+                var candidate = item.candidate;
+                var originalMethod = candidate.OriginalMethod;
+                var sourceType = candidate.ArgumentType;
+                var interfaceType = candidate.ExpectedInterfaceType;
+                var proxyStructName = $"{sourceType.Name}_{interfaceType.Name}_Proxy";
+                var sourceFullName = sourceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+                // Build parameters for the extension method
+                var extParams = new System.Collections.Generic.List<string>();
+
+                for (int i = 0; i < originalMethod.Parameters.Length; i++)
                 {
-                    callArgs.Add($"new {proxyStructName}({p.Name})");
+                    var p = originalMethod.Parameters[i];
+                    if (i == candidate.ArgumentIndex)
+                    {
+                        extParams.Add($"{sourceFullName} {p.Name}");
+                    }
+                    else
+                    {
+                        extParams.Add($"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}");
+                    }
+                }
+
+                var extParamsStr = string.Join(", ", extParams);
+                var extReturnTypeStr = originalMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                var methodName = originalMethod.Name;
+                var isStaticStr = candidate.IsStatic ? "static " : "";
+                var receiverStr = candidate.IsStatic ? targetFullName : receiverTargetName;
+
+                sb.AppendLine($"            public {isStaticStr}{extReturnTypeStr} {methodName}({extParamsStr})");
+                sb.AppendLine("            {");
+
+                // Build arguments for calling the original method
+                var callArgs = new System.Collections.Generic.List<string>();
+                for (int i = 0; i < originalMethod.Parameters.Length; i++)
+                {
+                    var p = originalMethod.Parameters[i];
+                    if (i == candidate.ArgumentIndex)
+                    {
+                        callArgs.Add($"new {proxyStructName}({p.Name})");
+                    }
+                    else
+                    {
+                        callArgs.Add(p.Name);
+                    }
+                }
+
+                var callArgsStr = string.Join(", ", callArgs);
+
+                if (originalMethod.ReturnType.SpecialType == SpecialType.System_Void)
+                {
+                    sb.AppendLine($"                {receiverStr}.{methodName}({callArgsStr});");
                 }
                 else
                 {
-                    callArgs.Add(p.Name);
+                    sb.AppendLine($"                return {receiverStr}.{methodName}({callArgsStr});");
                 }
-            }
 
-            var callArgsStr = string.Join(", ", callArgs);
-
-            if (originalMethod.ReturnType.SpecialType == SpecialType.System_Void)
-            {
-                sb.AppendLine($"            target.{methodName}({callArgsStr});");
-            }
-            else
-            {
-                sb.AppendLine($"            return target.{methodName}({callArgsStr});");
+                sb.AppendLine("            }");
             }
 
             sb.AppendLine("        }");
@@ -285,7 +311,7 @@ namespace NTypeForge.SourceGenerator
                 sb.AppendLine("}");
             }
 
-            context.AddSource(hintName, sb.ToString());
+            context.AddSource($"{targetType.Name}_DuckTyping.g.cs", sb.ToString());
         }
     }
 }
