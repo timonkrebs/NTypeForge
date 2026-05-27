@@ -15,11 +15,18 @@ namespace NTypeForge.SourceGenerator
     {
         private const string Namespace = "NTypeForge";
         private const string ExtensionClassName = "DuckExtensions";
-        private const string ExtensionMethodName = "AsDuck";
+        private const string ExtensionMethodName = "Duck";
 
         private const string InitialSources = @"
 namespace NTypeForge
 {
+    public interface IDuckHandler<T> where T : class { }
+
+    public static class Duck
+    {
+        public static IDuckHandler<T> Handler<T>() where T : class => null!;
+    }
+
     public static class " + ExtensionClassName + @"
     {
         public static T " + ExtensionMethodName + @"<T>(this object obj) where T : class
@@ -40,9 +47,18 @@ namespace NTypeForge
                     transform: (ctx, _) => GetDuckCallInfo(ctx))
                 .Where(m => m != null);
 
-            var compilationAndCalls = context.CompilationProvider.Combine(calls.Collect());
+            var handlerCalls = context.SyntaxProvider
+                .CreateSyntaxProvider(
+                    predicate: (s, _) => IsPotentialHandlerCall(s),
+                    transform: (ctx, _) => GetHandlerCallInfo(ctx))
+                .Where(m => m != null);
 
-            context.RegisterSourceOutput(compilationAndCalls, (spc, source) => Execute(source.Left, source.Right!, spc));
+            var allCalls = calls.Collect().Combine(handlerCalls.Collect())
+                .Select((pair, _) => pair.Left.AddRange(pair.Right));
+
+            var compilationAndCallsCombined = context.CompilationProvider.Combine(allCalls);
+
+            context.RegisterSourceOutput(compilationAndCallsCombined, (spc, source) => Execute(source.Left, source.Right!, spc));
         }
 
         private static bool IsPotentialDuckCall(SyntaxNode node)
@@ -73,6 +89,34 @@ namespace NTypeForge
             return new DuckCallInfo(targetType, interfaceType);
         }
 
+        private static bool IsPotentialHandlerCall(SyntaxNode node)
+        {
+            return node is InvocationExpressionSyntax invocation &&
+                   invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+                   memberAccess.Name is GenericNameSyntax genericName &&
+                   genericName.Identifier.Text == "Handler" &&
+                   memberAccess.Expression is IdentifierNameSyntax id &&
+                   id.Identifier.Text == "Duck";
+        }
+
+        private static DuckCallInfo? GetHandlerCallInfo(GeneratorSyntaxContext context)
+        {
+            var invocation = (InvocationExpressionSyntax)context.Node;
+            var memberAccess = (MemberAccessExpressionSyntax)invocation.Expression;
+
+            var memberSymbol = context.SemanticModel.GetSymbolInfo(memberAccess).Symbol as IMethodSymbol;
+            if (memberSymbol == null) return null;
+
+            if (memberSymbol.Name != "Handler" || memberSymbol.ContainingType.Name != "Duck" || memberSymbol.ContainingNamespace.ToDisplayString() != Namespace)
+                return null;
+
+            var interfaceType = (memberSymbol.ReturnType as INamedTypeSymbol)?.TypeArguments.FirstOrDefault();
+            if (interfaceType == null || interfaceType.TypeKind != TypeKind.Interface)
+                return null;
+
+            return new DuckCallInfo(null, interfaceType);
+        }
+
         private void Execute(Compilation compilation, ImmutableArray<DuckCallInfo> calls, SourceProductionContext context)
         {
             if (calls.IsDefaultOrEmpty) return;
@@ -81,13 +125,20 @@ namespace NTypeForge
 
             foreach (var pair in distinctPairs)
             {
-                GenerateWrapper(compilation, pair, context);
+                if (pair.TargetType != null)
+                {
+                    GenerateWrapper(compilation, pair, context);
+                }
+                else
+                {
+                    GenerateHandlerExtensions(compilation, pair, context);
+                }
             }
         }
 
         private void GenerateWrapper(Compilation compilation, DuckCallInfo pair, SourceProductionContext context)
         {
-            var targetType = pair.TargetType;
+            var targetType = pair.TargetType!;
             var interfaceType = (INamedTypeSymbol)pair.InterfaceType;
 
             var wrapperName = SanitizeIdentifier($"Duck_{targetType.ToDisplayString()}_{interfaceType.ToDisplayString()}");
@@ -107,7 +158,7 @@ namespace NTypeForge
             sb.AppendLine("        }");
             sb.AppendLine();
 
-            var membersToImplement = GetAllInterfaceMembers(interfaceType);
+            var membersToImplement = GetAllInterfaceMembers(interfaceType).ToList();
             var implementedMembers = new HashSet<string>();
 
             foreach (var member in membersToImplement)
@@ -117,9 +168,9 @@ namespace NTypeForge
                     var signature = GetMethodSignature(method);
                     if (implementedMembers.Add(signature))
                     {
-                        if (!TryImplementMethod(sb, targetType, method))
+                        if (!TryImplementMethod(sb, targetType, method) && method.IsAbstract)
                         {
-                            // TODO: report diagnostic
+                            // TODO: report diagnostic - abstract member MUST be implemented
                         }
                     }
                 }
@@ -131,7 +182,7 @@ namespace NTypeForge
 
                     if (implementedMembers.Add(key))
                     {
-                        if (!TryImplementProperty(sb, targetType, property))
+                        if (!TryImplementProperty(sb, targetType, property) && property.IsAbstract)
                         {
                             // TODO: report diagnostic
                         }
@@ -148,6 +199,36 @@ namespace NTypeForge
             sb.AppendLine("        {");
             sb.AppendLine($"            return (T)(object)new {wrapperName}(obj);");
             sb.AppendLine("        }");
+            sb.AppendLine();
+
+            implementedMembers.Clear();
+            foreach (var member in membersToImplement)
+            {
+                if (member is IMethodSymbol method && method.MethodKind == MethodKind.Ordinary)
+                {
+                    var signature = GetMethodSignature(method);
+                    if (implementedMembers.Add(signature))
+                    {
+                        // Generate structural extension method if it doesn't exist on target
+                        if (FindMatchingMethod(targetType, method) == null)
+                        {
+                            GenerateStructuralMethodExtension(sb, targetType, interfaceType, method);
+                        }
+                    }
+                }
+                else if (member is IPropertySymbol property)
+                {
+                    string key = property.IsIndexer ? GetIndexerSignature(property) : $"prop:{property.Name}";
+                    if (implementedMembers.Add(key))
+                    {
+                        if (FindMatchingProperty(targetType, property) == null)
+                        {
+                            GenerateStructuralPropertyExtension(sb, targetType, interfaceType, property);
+                        }
+                    }
+                }
+            }
+
             sb.AppendLine("    }");
             sb.AppendLine("}");
 
@@ -217,19 +298,23 @@ namespace NTypeForge
                 .FirstOrDefault(m => m.Name == interfaceMethod.Name && m.DeclaredAccessibility == Accessibility.Public && MatchesSignature(m, interfaceMethod));
         }
 
-        private bool TryImplementProperty(StringBuilder sb, ITypeSymbol targetType, IPropertySymbol interfaceProperty)
+        private IPropertySymbol? FindMatchingProperty(ITypeSymbol targetType, IPropertySymbol interfaceProperty)
         {
-            IPropertySymbol? targetProperty;
             if (interfaceProperty.IsIndexer)
             {
-                targetProperty = targetType.GetMembers().OfType<IPropertySymbol>()
+                return targetType.GetMembers().OfType<IPropertySymbol>()
                     .FirstOrDefault(p => p.IsIndexer && p.DeclaredAccessibility == Accessibility.Public && MatchesIndexerSignature(p, interfaceProperty));
             }
             else
             {
-                targetProperty = targetType.GetMembers().OfType<IPropertySymbol>()
+                return targetType.GetMembers().OfType<IPropertySymbol>()
                     .FirstOrDefault(p => p.Name == interfaceProperty.Name && p.DeclaredAccessibility == Accessibility.Public && SymbolEqualityComparer.Default.Equals(p.Type, interfaceProperty.Type));
             }
+        }
+
+        private bool TryImplementProperty(StringBuilder sb, ITypeSymbol targetType, IPropertySymbol interfaceProperty)
+        {
+            IPropertySymbol? targetProperty = FindMatchingProperty(targetType, interfaceProperty);
 
             if (targetProperty == null) return false;
 
@@ -277,6 +362,173 @@ namespace NTypeForge
             return true;
         }
 
+        private void GenerateHandlerExtensions(Compilation compilation, DuckCallInfo pair, SourceProductionContext context)
+        {
+            var interfaceType = (INamedTypeSymbol)pair.InterfaceType;
+            var wrapperName = SanitizeIdentifier($"Duck_Lambda_{interfaceType.ToDisplayString()}");
+            var sb = new StringBuilder();
+
+            sb.AppendLine("using System;");
+            sb.AppendLine();
+            sb.AppendLine("namespace NTypeForge");
+            sb.AppendLine("{");
+
+            var members = GetAllInterfaceMembers(interfaceType).ToList();
+            var methods = members.OfType<IMethodSymbol>().Where(m => m.MethodKind == MethodKind.Ordinary).ToList();
+            var properties = members.OfType<IPropertySymbol>().ToList();
+
+            var delegateMap = new Dictionary<ISymbol, string>(SymbolEqualityComparer.Default);
+            int delegateCount = 0;
+
+            foreach (var method in methods)
+            {
+                var delegateName = $"{wrapperName}_Delegate_{delegateCount++}";
+                sb.Append($"    internal delegate {method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {delegateName}(");
+                sb.Append(string.Join(", ", method.Parameters.Select(p => $"{GetParameterModifier(p)}{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}")));
+                sb.AppendLine(");");
+                delegateMap[method] = delegateName;
+            }
+
+            foreach (var prop in properties)
+            {
+                if (prop.GetMethod != null)
+                {
+                    var delegateName = $"{wrapperName}_Delegate_{delegateCount++}";
+                    if (prop.IsIndexer)
+                    {
+                        sb.Append($"    internal delegate {prop.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {delegateName}(");
+                        sb.Append(string.Join(", ", prop.Parameters.Select(p => $"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}")));
+                        sb.AppendLine(");");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"    internal delegate {prop.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {delegateName}();");
+                    }
+                    delegateMap[prop.GetMethod] = delegateName;
+                }
+                if (prop.SetMethod != null)
+                {
+                    var delegateName = $"{wrapperName}_Delegate_{delegateCount++}";
+                    if (prop.IsIndexer)
+                    {
+                        sb.Append($"    internal delegate void {delegateName}(");
+                        sb.Append(string.Join(", ", prop.Parameters.Select(p => $"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}")));
+                        sb.AppendLine($", {prop.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} value);");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"    internal delegate void {delegateName}({prop.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} value);");
+                    }
+                    delegateMap[prop.SetMethod] = delegateName;
+                }
+            }
+
+            sb.AppendLine();
+            sb.AppendLine($"    internal class {wrapperName} : {interfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}");
+            sb.AppendLine("    {");
+
+            foreach (var entry in delegateMap)
+            {
+                sb.AppendLine($"        private readonly {entry.Value} _{entry.Value};");
+            }
+
+            sb.AppendLine();
+            sb.Append($"        public {wrapperName}(");
+            sb.Append(string.Join(", ", delegateMap.Select(e => $"{e.Value} {e.Value}")));
+            sb.AppendLine(")");
+            sb.AppendLine("        {");
+            foreach (var entry in delegateMap)
+            {
+                sb.AppendLine($"            _{entry.Value} = {entry.Value};");
+            }
+            sb.AppendLine("        }");
+            sb.AppendLine();
+
+            foreach (var method in methods)
+            {
+                var delName = delegateMap[method];
+                sb.Append($"        public {method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {method.Name}(");
+                sb.Append(string.Join(", ", method.Parameters.Select(p => $"{GetParameterModifier(p)}{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}")));
+                sb.AppendLine(")");
+                sb.AppendLine("        {");
+                sb.Append("            ");
+                if (!method.ReturnsVoid) sb.Append("return ");
+                sb.Append($"_{delName}(");
+                sb.Append(string.Join(", ", method.Parameters.Select(p => $"{GetParameterModifier(p)}{p.Name}")));
+                sb.AppendLine(");");
+                sb.AppendLine("        }");
+                sb.AppendLine();
+            }
+
+            foreach (var prop in properties)
+            {
+                if (prop.IsIndexer)
+                {
+                    sb.Append($"        public {prop.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} this[");
+                    sb.Append(string.Join(", ", prop.Parameters.Select(p => $"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}")));
+                    sb.AppendLine("]");
+                }
+                else
+                {
+                    sb.AppendLine($"        public {prop.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {prop.Name}");
+                }
+                sb.AppendLine("        {");
+                if (prop.GetMethod != null)
+                {
+                    var delName = delegateMap[prop.GetMethod];
+                    sb.Append("            get => ");
+                    sb.Append($"_{delName}(");
+                    if (prop.IsIndexer) sb.Append(string.Join(", ", prop.Parameters.Select(p => p.Name)));
+                    sb.AppendLine(");");
+                }
+                if (prop.SetMethod != null)
+                {
+                    var delName = delegateMap[prop.SetMethod];
+                    sb.Append("            set => ");
+                    sb.Append($"_{delName}(");
+                    if (prop.IsIndexer)
+                    {
+                        sb.Append(string.Join(", ", prop.Parameters.Select(p => p.Name)));
+                        sb.Append(", ");
+                    }
+                    sb.AppendLine("value);");
+                }
+                sb.AppendLine("        }");
+                sb.AppendLine();
+            }
+
+            sb.AppendLine("    }");
+            sb.AppendLine();
+            sb.AppendLine($"    public static class {wrapperName}_HandlerExtensions");
+            sb.AppendLine("    {");
+            sb.Append($"        public static {interfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} Create(this IDuckHandler<{interfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}> handler");
+            foreach (var entry in delegateMap)
+            {
+                var paramName = GetParameterNameForSymbol(entry.Key);
+                sb.Append($", {entry.Value} {paramName}");
+            }
+            sb.AppendLine(")");
+            sb.AppendLine("        {");
+            sb.Append($"            return new {wrapperName}(");
+            sb.Append(string.Join(", ", delegateMap.Select(e => GetParameterNameForSymbol(e.Key))));
+            sb.AppendLine(");");
+            sb.AppendLine("        }");
+            sb.AppendLine("    }");
+            sb.AppendLine("}");
+
+            context.AddSource($"{wrapperName}.g.cs", SourceText.From(sb.ToString(), Encoding.UTF8));
+        }
+
+        private string GetParameterNameForSymbol(ISymbol symbol)
+        {
+            if (symbol is IMethodSymbol method && method.MethodKind != MethodKind.Ordinary)
+            {
+                var prefix = method.MethodKind == MethodKind.PropertyGet ? "get" : "set";
+                return $"{prefix}_{method.AssociatedSymbol!.Name}";
+            }
+            return symbol.Name;
+        }
+
         private string GetParameterModifier(IParameterSymbol p)
         {
             return p.RefKind switch
@@ -300,6 +552,44 @@ namespace NTypeForge
             return true;
         }
 
+        private void GenerateStructuralMethodExtension(StringBuilder sb, ITypeSymbol targetType, INamedTypeSymbol interfaceType, IMethodSymbol method)
+        {
+            sb.Append($"        public static {method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {method.Name}(this {targetType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} obj");
+            if (method.Parameters.Length > 0)
+            {
+                sb.Append(", ");
+                sb.Append(string.Join(", ", method.Parameters.Select(p => $"{GetParameterModifier(p)}{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}")));
+            }
+            sb.AppendLine(")");
+            sb.AppendLine("        {");
+            sb.Append($"            ");
+
+            bool implementsInterface = targetType.AllInterfaces.Any(i => SymbolEqualityComparer.Default.Equals(i, interfaceType));
+            if (implementsInterface)
+            {
+                if (!method.ReturnsVoid) sb.Append("return ");
+                sb.Append($"(({interfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)})obj).{method.Name}(");
+            }
+            else
+            {
+                if (!method.ReturnsVoid) sb.Append("return ");
+                sb.Append($"obj.Duck<{interfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}>().{method.Name}(");
+            }
+
+            sb.Append(string.Join(", ", method.Parameters.Select(p => $"{GetParameterModifier(p)}{p.Name}")));
+            sb.AppendLine(");");
+            sb.AppendLine("        }");
+            sb.AppendLine();
+        }
+
+        private void GenerateStructuralPropertyExtension(StringBuilder sb, ITypeSymbol targetType, INamedTypeSymbol interfaceType, IPropertySymbol property)
+        {
+            // Not straightforward as extension properties don't exist in C#.
+            // We could generate GetX/SetX methods, but the request was "looks like the method was called directly".
+            // For properties, we'll skip for now or generate methods if appropriate.
+            // "so that it looks like the method was called directly" - implies methods.
+        }
+
         private static string SanitizeIdentifier(string identifier)
         {
             var sb = new StringBuilder();
@@ -315,10 +605,10 @@ namespace NTypeForge
 
         private class DuckCallInfo
         {
-            public ITypeSymbol TargetType { get; }
+            public ITypeSymbol? TargetType { get; }
             public ITypeSymbol InterfaceType { get; }
 
-            public DuckCallInfo(ITypeSymbol targetType, ITypeSymbol interfaceType)
+            public DuckCallInfo(ITypeSymbol? targetType, ITypeSymbol interfaceType)
             {
                 TargetType = targetType;
                 InterfaceType = interfaceType;
@@ -337,8 +627,10 @@ namespace NTypeForge
 
             public int GetHashCode(DuckCallInfo obj)
             {
-                return SymbolEqualityComparer.Default.GetHashCode(obj.TargetType) ^
-                       SymbolEqualityComparer.Default.GetHashCode(obj.InterfaceType);
+                int hash = SymbolEqualityComparer.Default.GetHashCode(obj.InterfaceType);
+                if (obj.TargetType != null)
+                    hash ^= SymbolEqualityComparer.Default.GetHashCode(obj.TargetType);
+                return hash;
             }
         }
     }
