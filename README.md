@@ -80,15 +80,22 @@ internal readonly struct AddCalculator_ICalculator_Proxy : ICalculator
 
 public static class CalculatorManager_DuckTypingExtensions
 {
-    public static float HandleCalculate(this CalculatorManager target, AddCalculator handler, float a, float b)
+    extension (CalculatorManager target)
     {
-        return target.HandleCalculate(new AddCalculator_ICalculator_Proxy(handler), a, b);
+        public float HandleCalculate(AddCalculator handler, float a, float b)
+        {
+            return target.HandleCalculate(new AddCalculator_ICalculator_Proxy(handler), a, b);
+        }
     }
 }
 ```
 
 This ensures absolute zero-allocation overhead since the proxy is a `struct` (which will be boxed, but avoids the reflection setup entirely) and the extension method passes it right into the target.
 
+Static methods are also fully supported through C# 14 extension types! If `HandleCalculate` were a `static` method, it would generate `public static float HandleCalculate(...) { CalculatorManager.HandleCalculate(...); }` inside the extension type.
+
+> **Note:** Because NTypeForge now uses C# 14 extensions to power the duck typing, you will need to add `<LangVersion>preview</LangVersion>` to your `.csproj` file to enable the feature while it's in preview.
+
 ## About
 
-Experiments for zero-overhead structural duck typing support in C# 10.
+Experiments for zero-overhead structural duck typing support in C# 14.
