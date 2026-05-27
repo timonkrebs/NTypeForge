@@ -13,6 +13,7 @@ namespace NTypeForge.SourceGenerator.Models
         public ITypeSymbol ExpectedInterfaceType;
         public int ArgumentIndex;
         public IMethodSymbol OriginalMethod;
+        public bool IsStatic;
 
         public CandidateInvocation(
             InvocationExpressionSyntax invocation,
@@ -21,7 +22,8 @@ namespace NTypeForge.SourceGenerator.Models
             ITypeSymbol argumentType,
             ITypeSymbol expectedInterfaceType,
             int argumentIndex,
-            IMethodSymbol originalMethod)
+            IMethodSymbol originalMethod,
+            bool isStatic)
         {
             Invocation = invocation;
             MethodName = methodName;
@@ -30,6 +32,7 @@ namespace NTypeForge.SourceGenerator.Models
             ExpectedInterfaceType = expectedInterfaceType;
             ArgumentIndex = argumentIndex;
             OriginalMethod = originalMethod;
+            IsStatic = isStatic;
         }
     }
 }
