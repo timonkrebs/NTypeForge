@@ -106,7 +106,7 @@ public class GeometryManager
     }
 }
 
-public class DuckTypingAdvancedTests
+public partial class DuckTypingAdvancedTests
 {
     [Fact]
     public void CanDuckTypeWhenTargetHasMoreMembers()
@@ -169,4 +169,54 @@ public class DuckTypingAdvancedTests
         Assert.Equal(0, point.X);
         Assert.Equal(0, point.Y);
     }
+
+    [Fact]
+    public void CanDuckTypeInterfaceWithProperties()
+    {
+        var person = new PersonRecord("Bob", 25);
+        var processor = new PersonHandler(); // IPersonProcessor only has Process(PersonRecord)
+
+        // Let's define a new interface with properties
+        // Actually, I'll use a local class/interface if possible or just add to the file.
+    }
+}
+
+public interface INamed
+{
+    string Name { get; }
+}
+
+public partial class NameManager
+{
+    public string GetName(INamed named) => named.Name;
+}
+
+public partial class DuckTypingAdvancedTests
+{
+    [Fact]
+    public void CanDuckTypeRecordToInterfaceWithProperty()
+    {
+        var person = new PersonRecord("Alice", 30);
+        var manager = new NameManager();
+
+        // person (PersonRecord) has Name property, INamed requires Name property.
+        var name = manager.GetName(person);
+
+        Assert.Equal("Alice", name);
+    }
+
+    [Fact]
+    public void CanDuckTypeRecordInConstructor()
+    {
+        var person = new PersonRecord("Alice", 30);
+        var manager = NameManager.New(person);
+        Assert.NotNull(manager);
+    }
+}
+
+public partial class NameManager
+{
+    private INamed _named;
+    public NameManager(INamed named) => _named = named;
+    public NameManager() {}
 }

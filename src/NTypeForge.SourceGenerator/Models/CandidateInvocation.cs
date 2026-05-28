@@ -6,7 +6,7 @@ namespace NTypeForge.SourceGenerator.Models
 {
     internal struct CandidateInvocation
     {
-        public InvocationExpressionSyntax Invocation;
+        public ExpressionSyntax Node;
         public string MethodName;
         public ITypeSymbol TargetType;
         public ITypeSymbol ArgumentType;
@@ -16,7 +16,7 @@ namespace NTypeForge.SourceGenerator.Models
         public bool IsStatic;
 
         public CandidateInvocation(
-            InvocationExpressionSyntax invocation,
+            ExpressionSyntax node,
             string methodName,
             ITypeSymbol targetType,
             ITypeSymbol argumentType,
@@ -25,7 +25,7 @@ namespace NTypeForge.SourceGenerator.Models
             IMethodSymbol originalMethod,
             bool isStatic)
         {
-            Invocation = invocation;
+            Node = node;
             MethodName = methodName;
             TargetType = targetType;
             ArgumentType = argumentType;

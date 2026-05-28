@@ -17,15 +17,33 @@ namespace NTypeForge.SourceGenerator.Models
         }
     }
 
+    internal class ProxyPropertyInfo
+    {
+        public string Name { get; }
+        public ITypeSymbol Type { get; }
+        public bool HasGet { get; }
+        public bool HasSet { get; }
+
+        public ProxyPropertyInfo(string name, ITypeSymbol type, bool hasGet, bool hasSet)
+        {
+            Name = name;
+            Type = type;
+            HasGet = hasGet;
+            HasSet = hasSet;
+        }
+    }
+
     internal class StructuralMatchResult
     {
         public bool IsMatch { get; }
         public IReadOnlyList<ProxyMethodInfo> MatchedMethods { get; }
+        public IReadOnlyList<ProxyPropertyInfo> MatchedProperties { get; }
 
-        public StructuralMatchResult(bool isMatch, IReadOnlyList<ProxyMethodInfo> matchedMethods)
+        public StructuralMatchResult(bool isMatch, IReadOnlyList<ProxyMethodInfo> matchedMethods, IReadOnlyList<ProxyPropertyInfo> matchedProperties)
         {
             IsMatch = isMatch;
             MatchedMethods = matchedMethods;
+            MatchedProperties = matchedProperties;
         }
     }
 }

@@ -16,7 +16,7 @@ namespace NTypeForge.SourceGenerator
         // Find all method invocations that fail to compile
         var candidateInvocations = context.SyntaxProvider
             .CreateSyntaxProvider(
-                predicate: static (s, _) => s is InvocationExpressionSyntax,
+                predicate: static (s, _) => s is InvocationExpressionSyntax || s is ObjectCreationExpressionSyntax,
                 transform: static (ctx, _) => GetCandidateInvocation(ctx))
             .Where(static c => c != null)
             .Select(static (c, _) => c!.Value);
@@ -28,11 +28,11 @@ namespace NTypeForge.SourceGenerator
 
     private static CandidateInvocation? GetCandidateInvocation(GeneratorSyntaxContext context)
     {
-        var invocation = (InvocationExpressionSyntax)context.Node;
+        var node = (ExpressionSyntax)context.Node;
         var semanticModel = context.SemanticModel;
 
         // We are looking for invocations that have compiler errors
-        var symbolInfo = semanticModel.GetSymbolInfo(invocation);
+        var symbolInfo = semanticModel.GetSymbolInfo(node);
         if (symbolInfo.Symbol != null)
         {
             // If the symbol resolved perfectly, it doesn't need our help
@@ -54,7 +54,12 @@ namespace NTypeForge.SourceGenerator
 
             if (targetType == null) continue;
 
-            var arguments = invocation.ArgumentList.Arguments;
+            var arguments = node switch
+            {
+                InvocationExpressionSyntax inv => inv.ArgumentList.Arguments,
+                ObjectCreationExpressionSyntax obj => obj.ArgumentList?.Arguments ?? default,
+                _ => default
+            };
             if (arguments.Count != candidate.Parameters.Length) continue;
 
             for (int i = 0; i < arguments.Count; i++)
@@ -75,14 +80,14 @@ namespace NTypeForge.SourceGenerator
                     {
                         // Potential match!
                         return new CandidateInvocation(
-                            invocation,
+                            node,
                             candidate.Name,
                             targetType,
                             argType,
                             paramType,
                             i,
                             candidate,
-                            candidate.IsStatic
+                            candidate.IsStatic || candidate.MethodKind == MethodKind.Constructor
                         );
                     }
                 }
@@ -110,7 +115,9 @@ namespace NTypeForge.SourceGenerator
                     if (matchResult.IsMatch)
                     {
                         // Ensure we don't generate the same extension method multiple times
-                        var methodHint = $"{candidate.OriginalMethod.Name}_{candidate.ArgumentType.Name}";
+                        var isConstructor = candidate.OriginalMethod.MethodKind == MethodKind.Constructor;
+                        var methodName = isConstructor ? "New" : candidate.OriginalMethod.Name;
+                        var methodHint = $"{methodName}_{candidate.ArgumentType.Name}";
                         if (generatedHints.Add(methodHint))
                         {
                             extensionsToGenerate.Add((candidate, matchResult));
@@ -139,13 +146,44 @@ namespace NTypeForge.SourceGenerator
 
                 if (matchingMethod == null)
                 {
-                    return new StructuralMatchResult(false, new System.Collections.Generic.List<ProxyMethodInfo>());
+                    return new StructuralMatchResult(false, new System.Collections.Generic.List<ProxyMethodInfo>(), new System.Collections.Generic.List<ProxyPropertyInfo>());
                 }
 
                 matchedMethods.Add(new ProxyMethodInfo(expectedMethod.Name, expectedMethod.ReturnType, expectedMethod.Parameters));
             }
 
-            return new StructuralMatchResult(true, matchedMethods);
+            var matchedProperties = new System.Collections.Generic.List<ProxyPropertyInfo>();
+            var interfaceProperties = interfaceType.GetMembers().OfType<IPropertySymbol>();
+
+            foreach (var expectedProp in interfaceProperties)
+            {
+                var matchingProp = sourceType.GetMembers(expectedProp.Name)
+                    .OfType<IPropertySymbol>()
+                    .FirstOrDefault(p => ArePropertiesCompatible(expectedProp, p));
+
+                if (matchingProp == null)
+                {
+                    return new StructuralMatchResult(false, new System.Collections.Generic.List<ProxyMethodInfo>(), new System.Collections.Generic.List<ProxyPropertyInfo>());
+                }
+
+                matchedProperties.Add(new ProxyPropertyInfo(expectedProp.Name, expectedProp.Type, expectedProp.GetMethod != null, expectedProp.SetMethod != null));
+            }
+
+            return new StructuralMatchResult(true, matchedMethods, matchedProperties);
+        }
+
+        private static bool ArePropertiesCompatible(IPropertySymbol expected, IPropertySymbol actual)
+        {
+            if (!SymbolEqualityComparer.Default.Equals(expected.Type, actual.Type))
+                return false;
+
+            if (expected.GetMethod != null && actual.GetMethod == null)
+                return false;
+
+            if (expected.SetMethod != null && actual.SetMethod == null)
+                return false;
+
+            return true;
         }
 
         private static bool AreMethodsCompatible(IMethodSymbol expected, IMethodSymbol actual)
@@ -176,6 +214,7 @@ namespace NTypeForge.SourceGenerator
             var sb = new System.Text.StringBuilder();
 
             sb.AppendLine("// <auto-generated/>");
+            sb.AppendLine("// Extensions generated for " + targetFullName);
             sb.AppendLine("using System;");
             sb.AppendLine();
 
@@ -248,6 +287,22 @@ namespace NTypeForge.SourceGenerator
                         }
                         sb.AppendLine("        }");
                     }
+
+                    foreach (var prop in item.matchResult.MatchedProperties)
+                    {
+                        var propTypeStr = prop.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                        sb.AppendLine($"        public {propTypeStr} {prop.Name}");
+                        sb.AppendLine("        {");
+                        if (prop.HasGet)
+                        {
+                            sb.AppendLine($"            get => _instance.{prop.Name};");
+                        }
+                        if (prop.HasSet)
+                        {
+                            sb.AppendLine($"            set => _instance.{prop.Name} = value;");
+                        }
+                        sb.AppendLine("        }");
+                    }
                     sb.AppendLine("    }");
                     sb.AppendLine();
                 }
@@ -295,10 +350,11 @@ namespace NTypeForge.SourceGenerator
                 }
 
                 var extParamsStr = string.Join(", ", extParams);
-                var extReturnTypeStr = originalMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                var methodName = originalMethod.Name;
-                var isStaticStr = candidate.IsStatic ? "static " : "";
-                var receiverStr = candidate.IsStatic ? targetFullName : receiverTargetName;
+                var isConstructor = originalMethod.MethodKind == MethodKind.Constructor;
+                var extReturnTypeStr = isConstructor ? targetType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) : originalMethod.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                var methodName = isConstructor ? "New" : originalMethod.Name;
+                var isStaticStr = (candidate.IsStatic || isConstructor) ? "static " : "";
+                var receiverStr = (candidate.IsStatic && !isConstructor) ? targetFullName : receiverTargetName;
 
                 var methodSignature = $"{isStaticStr}{extReturnTypeStr} {methodName}({extParamsStr})";
                 if (!generatedExtensions.Add(methodSignature))
@@ -333,7 +389,11 @@ namespace NTypeForge.SourceGenerator
 
                 var callArgsStr = string.Join(", ", callArgs);
 
-                if (originalMethod.ReturnType.SpecialType == SpecialType.System_Void)
+                if (isConstructor)
+                {
+                    sb.AppendLine($"                return new {targetFullName}({callArgsStr});");
+                }
+                else if (originalMethod.ReturnType.SpecialType == SpecialType.System_Void)
                 {
                     sb.AppendLine($"                {receiverStr}.{methodName}({callArgsStr});");
                 }
