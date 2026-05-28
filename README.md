@@ -53,6 +53,39 @@ Console.WriteLine($"Result: {result}");
 
 And it's done. The compilation errors are gone, and everything works as expected.
 
+### Advanced Types Support
+
+NTypeForge is fully capable of handling advanced C# types natively without losing context or safety. The source generator supports passing and interacting with complex types like `record` and `struct` elements natively, including maintaining all `ref`, `out`, and `in` parameter behaviors!
+
+For example:
+```cs
+public struct Point { public int X, Y; }
+
+public interface IGeometry
+{
+    void Move(ref Point point, int dx, int dy);
+    void SetOrigin(out Point point);
+}
+
+public class MyGeometry
+{
+    // Implementation exactly structurally matches, including ref/out modifiers!
+    public void Move(ref Point point, int dx, int dy) { ... }
+    public void SetOrigin(out Point point) { ... }
+}
+
+public class GeometryManager
+{
+    public void Transform(IGeometry geometry) { ... }
+}
+
+var manager = new GeometryManager();
+var geom = new MyGeometry();
+
+// Compiles and maintains all struct/ref semantics automatically!
+manager.Transform(geom);
+```
+
 ## How it works
 
 There is an incremental source generator that looks for method calls that fail to compile due to missing interfaces.
