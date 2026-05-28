@@ -160,6 +160,8 @@ namespace NTypeForge.SourceGenerator
             {
                 if (!SymbolEqualityComparer.Default.Equals(expected.Parameters[i].Type, actual.Parameters[i].Type))
                     return false;
+                if (expected.Parameters[i].RefKind != actual.Parameters[i].RefKind)
+                    return false;
             }
 
             return true;
@@ -213,8 +215,26 @@ namespace NTypeForge.SourceGenerator
                     foreach (var method in item.matchResult.MatchedMethods)
                     {
                         var returnTypeStr = method.ReturnType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                        var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}"));
-                        var argsStr = string.Join(", ", method.Parameters.Select(p => p.Name));
+
+                        var parametersStr = string.Join(", ", method.Parameters.Select(p => {
+                            var refKind = p.RefKind switch {
+                                RefKind.Ref => "ref ",
+                                RefKind.Out => "out ",
+                                RefKind.In => "in ",
+                                _ => ""
+                            };
+                            return $"{refKind}{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}";
+                        }));
+
+                        var argsStr = string.Join(", ", method.Parameters.Select(p => {
+                            var refKind = p.RefKind switch {
+                                RefKind.Ref => "ref ",
+                                RefKind.Out => "out ",
+                                RefKind.In => "in ",
+                                _ => ""
+                            };
+                            return $"{refKind}{p.Name}";
+                        }));
 
                         sb.AppendLine($"        public {returnTypeStr} {method.Name}({parametersStr})");
                         sb.AppendLine("        {");
@@ -240,6 +260,8 @@ namespace NTypeForge.SourceGenerator
             sb.AppendLine($"        extension ({targetFullName} {receiverTargetName})");
             sb.AppendLine("        {");
 
+            var generatedExtensions = new System.Collections.Generic.HashSet<string>();
+
             foreach (var item in extensions)
             {
                 var candidate = item.candidate;
@@ -255,13 +277,20 @@ namespace NTypeForge.SourceGenerator
                 for (int i = 0; i < originalMethod.Parameters.Length; i++)
                 {
                     var p = originalMethod.Parameters[i];
+                    var refKind = p.RefKind switch {
+                        RefKind.Ref => "ref ",
+                        RefKind.Out => "out ",
+                        RefKind.In => "in ",
+                        _ => ""
+                    };
+
                     if (i == candidate.ArgumentIndex)
                     {
                         extParams.Add($"{sourceFullName} {p.Name}");
                     }
                     else
                     {
-                        extParams.Add($"{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}");
+                        extParams.Add($"{refKind}{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} {p.Name}");
                     }
                 }
 
@@ -271,6 +300,12 @@ namespace NTypeForge.SourceGenerator
                 var isStaticStr = candidate.IsStatic ? "static " : "";
                 var receiverStr = candidate.IsStatic ? targetFullName : receiverTargetName;
 
+                var methodSignature = $"{isStaticStr}{extReturnTypeStr} {methodName}({extParamsStr})";
+                if (!generatedExtensions.Add(methodSignature))
+                {
+                    continue;
+                }
+
                 sb.AppendLine($"            public {isStaticStr}{extReturnTypeStr} {methodName}({extParamsStr})");
                 sb.AppendLine("            {");
 
@@ -279,13 +314,20 @@ namespace NTypeForge.SourceGenerator
                 for (int i = 0; i < originalMethod.Parameters.Length; i++)
                 {
                     var p = originalMethod.Parameters[i];
+                    var refKind = p.RefKind switch {
+                        RefKind.Ref => "ref ",
+                        RefKind.Out => "out ",
+                        RefKind.In => "in ",
+                        _ => ""
+                    };
+
                     if (i == candidate.ArgumentIndex)
                     {
                         callArgs.Add($"new {proxyStructName}({p.Name})");
                     }
                     else
                     {
-                        callArgs.Add(p.Name);
+                        callArgs.Add($"{refKind}{p.Name}");
                     }
                 }
 
