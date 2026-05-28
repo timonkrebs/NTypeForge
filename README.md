@@ -18,15 +18,6 @@ public class AddCalculator
     return a + b;
   }
 }
-```
-
-It is important to notice that the `AddCalculator` doesn't implement `ICalculator` in any way. It just has an identical method declaration. If we try to use it like in the next snippet, we will get a compilation error:
-```cs
-var addCalculator = new AddCalculator();
-var manager = new CalculatorManager();
-
-// This won't compile
-var result = manager.HandleCalculate(addCalculator, 10, 20);
 
 public class CalculatorManager
 {
@@ -37,6 +28,15 @@ public class CalculatorManager
 }
 ```
 
+It is important to notice that the `AddCalculator` doesn't implement `ICalculator` in any way. It just has an identical method declaration. If we try to use it like in the next snippet, we will get a compilation error:
+```cs
+var addCalculator = new AddCalculator();
+var manager = new CalculatorManager();
+
+// This won't compile without NTypeForge referenced in the project!
+var result = manager.HandleCalculate(addCalculator, 10, 20);
+```
+
 In this case, duck typing can be helpful because it will allow us to pass `AddCalculator` easily. NTypeForge handles this automatically!
 
 The source generator will automatically see that `HandleCalculate` expects an `ICalculator` and you passed an `AddCalculator`. Because `AddCalculator` structurally matches the interface requirements, NTypeForge kicks in and fixes it automatically.
@@ -45,7 +45,7 @@ The source generator will automatically see that `HandleCalculate` expects an `I
 var addCalculator = new AddCalculator();
 var manager = new CalculatorManager();
 
-// This magically compiles!
+// After referencing NTypeForge in the Project this magically compiles!
 var result = manager.HandleCalculate(addCalculator, 10, 20);
 
 Console.WriteLine($"Result: {result}");
