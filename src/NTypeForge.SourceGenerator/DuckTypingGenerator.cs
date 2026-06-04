@@ -29,10 +29,9 @@ namespace NTypeForge.SourceGenerator
 
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
-            // TODO(perf/caching): CandidateInvocation carries ITypeSymbol/syntax nodes, and
-            // we Combine with the whole CompilationProvider below. Roslyn symbols are not
-            // value-equatable and root the compilation, so the incremental cache never hits
-            // and Execute re-runs on every edit. Follow-up: project an equatable primitive
+            // TODO(perf/caching): CandidateInvocation carries ITypeSymbol/syntax nodes, which
+            // are not value-equatable and root the compilation, so the incremental cache never
+            // hits and Execute re-runs on every edit. Follow-up: project an equatable primitive
             // model in the transform stage and keep symbols out of the cached pipeline.
             var candidateInvocations = context.SyntaxProvider
                 .CreateSyntaxProvider(
@@ -41,10 +40,15 @@ namespace NTypeForge.SourceGenerator
                 .Where(static c => c != null)
                 .Select(static (c, _) => c!.Value);
 
-            var compilationAndCandidates = context.CompilationProvider.Combine(candidateInvocations.Collect());
-
-            context.RegisterSourceOutput(compilationAndCandidates, static (spc, source) => Execute(spc, source.Left, source.Right));
+            // Execute only needs the candidates (each already carries the symbols it requires);
+            // it never reads the Compilation, so we don't Combine with CompilationProvider.
+            context.RegisterSourceOutput(candidateInvocations.Collect(), static (spc, candidates) => Execute(spc, candidates));
         }
+
+        // Matches the top-level `NTypeForge` namespace only, so a user's unrelated
+        // `Foo.NTypeForge` namespace is not mistaken for the library's.
+        private static bool IsTopLevelNTypeForgeNamespace(INamespaceSymbol? ns)
+            => ns != null && ns.Name == "NTypeForge" && (ns.ContainingNamespace == null || ns.ContainingNamespace.IsGlobalNamespace);
 
         private static ITypeSymbol GetUnderlyingType(ITypeSymbol type)
         {
@@ -52,8 +56,7 @@ namespace NTypeForge.SourceGenerator
             {
                 if (t is INamedTypeSymbol nt && nt.IsGenericType && nt.Name == "IProxy" && nt.TypeArguments.Length == 1)
                 {
-                    var ns = nt.ContainingNamespace;
-                    return ns != null && ns.Name == "NTypeForge" && (ns.ContainingNamespace == null || ns.ContainingNamespace.IsGlobalNamespace);
+                    return IsTopLevelNTypeForgeNamespace(nt.ContainingNamespace);
                 }
                 return false;
             }
@@ -82,7 +85,7 @@ namespace NTypeForge.SourceGenerator
 
             // Handle Duck<T> calls
             if (symbolInfo.Symbol is IMethodSymbol resolvedMethod && resolvedMethod.Name == "Duck" &&
-                resolvedMethod.ContainingNamespace.Name == "NTypeForge" && resolvedMethod.TypeArguments.Length == 1)
+                IsTopLevelNTypeForgeNamespace(resolvedMethod.ContainingNamespace) && resolvedMethod.TypeArguments.Length == 1)
             {
                 var targetInterface = resolvedMethod.TypeArguments[0];
                 ExpressionSyntax? instanceExpr = null;
@@ -173,19 +176,7 @@ namespace NTypeForge.SourceGenerator
             public StructuralMatchResult MatchResult;
         }
 
-        private class TypePairComparer : IEqualityComparer<(ITypeSymbol, ITypeSymbol)>
-        {
-            public bool Equals((ITypeSymbol, ITypeSymbol) x, (ITypeSymbol, ITypeSymbol) y)
-            {
-                return SymbolEqualityComparer.Default.Equals(x.Item1, y.Item1) && SymbolEqualityComparer.Default.Equals(x.Item2, y.Item2);
-            }
-            public int GetHashCode((ITypeSymbol, ITypeSymbol) obj)
-            {
-                return (SymbolEqualityComparer.Default.GetHashCode(obj.Item1) * 397) ^ SymbolEqualityComparer.Default.GetHashCode(obj.Item2);
-            }
-        }
-
-        private static void Execute(SourceProductionContext context, Compilation compilation, System.Collections.Immutable.ImmutableArray<CandidateInvocation> candidates)
+        private static void Execute(SourceProductionContext context, System.Collections.Immutable.ImmutableArray<CandidateInvocation> candidates)
         {
             if (candidates.IsDefaultOrEmpty) return;
 
@@ -239,7 +230,10 @@ namespace NTypeForge.SourceGenerator
             foreach (var iface in interfaces.OrderBy(StableKey, StringComparer.Ordinal))
             {
                 var list = new List<(ITypeSymbol, StructuralMatchResult)>();
-                foreach (var concrete in concreteTypes.OrderBy(StableKey, StringComparer.Ordinal))
+                // Most-derived first: the generated unwrap branches test `TryUnbox<C>` (an
+                // `is C` check), which is also true for subtypes of C. Ordering a derived type
+                // ahead of its base ensures the exact concrete type wins its own branch.
+                foreach (var concrete in concreteTypes.OrderByDescending(BaseTypeDepth).ThenBy(StableKey, StringComparer.Ordinal))
                 {
                     var match = CheckStructuralMatch(concrete, iface);
                     if (match.IsMatch)
@@ -346,10 +340,12 @@ namespace NTypeForge.SourceGenerator
                         // is always taken trivially, so we skip it and wrap directly.
                         if (targetType.TypeKind == TypeKind.Interface &&
                             possibleMatches.TryGetValue(candidate.ExpectedInterfaceType, out var matches)) {
+                            int ui = 0;
                             foreach (var m in matches) {
+                                var local = $"c_{ui++}";
                                 var cName = m.Concrete.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                                 var pName = $"{(m.Concrete.ContainingNamespace.IsGlobalNamespace ? "NTypeForge" : m.Concrete.ContainingNamespace.ToDisplayString())}.{GetProxyStructName(m.Concrete, candidate.ExpectedInterfaceType)}";
-                                sb.AppendLine($"                    if (target.TryUnbox<{cName}>(out var c_{m.Concrete.Name})) return (T)(object)new {pName}(c_{m.Concrete.Name});");
+                                sb.AppendLine($"                    if (target.TryUnbox<{cName}>(out var {local})) return (T)(object)new {pName}({local});");
                             }
                         }
                         sb.AppendLine($"                    return (T)(object)new {proxyFullName}(({candidate.UnderlyingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)})target);");
@@ -386,18 +382,25 @@ namespace NTypeForge.SourceGenerator
                             var argName = originalMethod.Parameters[candidate.ArgumentIndex].Name;
                             var argType = candidate.ExpectedInterfaceType;
 
-                            if (possibleMatches.TryGetValue(argType, out var matches)) {
+                            // Unwrap branches only make sense when the incoming value can actually
+                            // be a proxy, i.e. when its static type is an interface. For a concrete
+                            // argument type they are dead branches and force a needless box (TryUnbox
+                            // is an extension on object), so we skip straight to the direct wrap.
+                            if (candidate.ArgumentType.TypeKind == TypeKind.Interface &&
+                                possibleMatches.TryGetValue(argType, out var matches)) {
+                                int ui = 0;
                                 foreach (var m in matches) {
+                                    var local = $"c_{ui++}";
                                     var cName = m.Concrete.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                                     var pName = $"{(m.Concrete.ContainingNamespace.IsGlobalNamespace ? "NTypeForge" : m.Concrete.ContainingNamespace.ToDisplayString())}.{GetProxyStructName(m.Concrete, argType)}";
 
                                     var callArgsUnboxed = string.Join(", ", originalMethod.Parameters.Select((p, idx) => {
                                         var refKind = p.RefKind switch { RefKind.Ref => "ref ", RefKind.Out => "out ", RefKind.In => "in ", _ => "" };
-                                        if (idx == candidate.ArgumentIndex) return $"new {pName}(c_{m.Concrete.Name})";
+                                        if (idx == candidate.ArgumentIndex) return $"new {pName}({local})";
                                         return $"{refKind}{p.Name}";
                                     }));
                                     var receiver = candidate.IsStatic ? targetFullName : "target";
-                                    sb.AppendLine($"                if ({argName}.TryUnbox<{cName}>(out var c_{m.Concrete.Name})) {{");
+                                    sb.AppendLine($"                if ({argName}.TryUnbox<{cName}>(out var {local})) {{");
                                     if (originalMethod.ReturnType.SpecialType == SpecialType.System_Void) sb.AppendLine($"                    {receiver}.{originalMethod.Name}({callArgsUnboxed}); return;");
                                     else sb.AppendLine($"                    return {receiver}.{originalMethod.Name}({callArgsUnboxed});");
                                     sb.AppendLine("                }");
@@ -421,7 +424,10 @@ namespace NTypeForge.SourceGenerator
                 sb.AppendLine("        }");
                 sb.AppendLine("    }");
                 sb.AppendLine("}");
-                context.AddSource(extensionClassName + ".g.cs", sb.ToString());
+                // Qualify the hint with the target namespace: two target types with the same
+                // simple name in different namespaces (e.g. A.Box and B.Box) would otherwise
+                // produce the same hint name and crash the generator (duplicate hintName).
+                context.AddSource($"{targetNamespace.Replace(".", "_")}_{extensionClassName}.g.cs", sb.ToString());
             }
         }
 
@@ -469,11 +475,16 @@ namespace NTypeForge.SourceGenerator
         // or indexer). Accessor methods are reported via their owning property/event.
         private static ISymbol? FindUnsupportedInterfaceMember(ITypeSymbol interfaceType)
         {
-            foreach (var member in interfaceType.GetMembers())
+            // A proxy declared to implement `interfaceType` must satisfy members inherited
+            // from base interfaces too, so scan the full transitive set.
+            foreach (var iface in new[] { interfaceType }.Concat(interfaceType.AllInterfaces))
             {
-                if (member is IPropertySymbol || member is IEventSymbol)
+                foreach (var member in iface.GetMembers())
                 {
-                    return member;
+                    if (member is IPropertySymbol || member is IEventSymbol)
+                    {
+                        return member;
+                    }
                 }
             }
             return null;
@@ -482,10 +493,24 @@ namespace NTypeForge.SourceGenerator
         private static StructuralMatchResult CheckStructuralMatch(ITypeSymbol sourceType, ITypeSymbol interfaceType)
         {
             var matchedMethods = new List<ProxyMethodInfo>();
-            var interfaceMethods = interfaceType.GetMembers().OfType<IMethodSymbol>().Where(m => m.MethodKind == MethodKind.Ordinary);
+            var seenSignatures = new HashSet<string>(StringComparer.Ordinal);
+
+            // Include methods inherited from base interfaces: the proxy must implement every
+            // member `interfaceType` transitively requires, or the generated struct fails
+            // CS0535. The direct interface is scanned first so a re-declared (shadowing)
+            // member wins over the inherited one of the same signature.
+            var interfaceMethods = new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
+                .SelectMany(i => i.GetMembers())
+                .OfType<IMethodSymbol>()
+                .Where(m => m.MethodKind == MethodKind.Ordinary);
 
             foreach (var expectedMethod in interfaceMethods)
             {
+                if (!seenSignatures.Add(MethodSignatureKey(expectedMethod)))
+                {
+                    continue;
+                }
+
                 var matchingMethod = sourceType.GetMembers(expectedMethod.Name)
                     .OfType<IMethodSymbol>()
                     .FirstOrDefault(m => AreMethodsCompatible(expectedMethod, m));
@@ -519,6 +544,23 @@ namespace NTypeForge.SourceGenerator
         // the (unspecified) iteration order of symbol-keyed hash sets/dictionaries.
         private static string StableKey(ITypeSymbol type)
             => type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+
+        // Number of base types, used to order more-derived types ahead of their bases.
+        private static int BaseTypeDepth(ITypeSymbol type)
+        {
+            int depth = 0;
+            for (var b = type.BaseType; b != null; b = b.BaseType) depth++;
+            return depth;
+        }
+
+        // Name + parameter shape, excluding return type, so overloads that differ only by
+        // return type (re-abstraction across base interfaces) collapse to one entry.
+        private static string MethodSignatureKey(IMethodSymbol method)
+        {
+            var parameters = string.Join(",", method.Parameters.Select(p =>
+                $"{p.RefKind}:{p.Type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}"));
+            return $"{method.Name}({parameters})";
+        }
 
         private static string GetProxyStructName(ITypeSymbol sourceType, ITypeSymbol interfaceType)
         {
