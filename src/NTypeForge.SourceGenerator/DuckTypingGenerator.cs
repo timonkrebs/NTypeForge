@@ -11,8 +11,29 @@ namespace NTypeForge.SourceGenerator
     [Generator]
     public class DuckTypingGenerator : IIncrementalGenerator
     {
+        private static readonly DiagnosticDescriptor NoStructuralMatch = new DiagnosticDescriptor(
+            id: "NTF001",
+            title: "No structural match for Duck<T>",
+            messageFormat: "Type '{0}' cannot be duck-typed to '{1}': it does not structurally implement all required members",
+            category: "NTypeForge",
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
+        private static readonly DiagnosticDescriptor UnsupportedInterfaceMember = new DiagnosticDescriptor(
+            id: "NTF002",
+            title: "Unsupported interface member for duck typing",
+            messageFormat: "Interface '{0}' cannot be duck-typed: member '{1}' is not a method. NTypeForge only supports method members.",
+            category: "NTypeForge",
+            defaultSeverity: DiagnosticSeverity.Error,
+            isEnabledByDefault: true);
+
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
+            // TODO(perf/caching): CandidateInvocation carries ITypeSymbol/syntax nodes, and
+            // we Combine with the whole CompilationProvider below. Roslyn symbols are not
+            // value-equatable and root the compilation, so the incremental cache never hits
+            // and Execute re-runs on every edit. Follow-up: project an equatable primitive
+            // model in the transform stage and keep symbols out of the cached pipeline.
             var candidateInvocations = context.SyntaxProvider
                 .CreateSyntaxProvider(
                     predicate: static (s, _) => s is InvocationExpressionSyntax,
@@ -25,10 +46,8 @@ namespace NTypeForge.SourceGenerator
             context.RegisterSourceOutput(compilationAndCandidates, static (spc, source) => Execute(spc, source.Left, source.Right));
         }
 
-        private static ITypeSymbol GetUnderlyingType(ITypeSymbol type, out bool isProxy)
+        private static ITypeSymbol GetUnderlyingType(ITypeSymbol type)
         {
-            isProxy = false;
-
             bool IsProxyInterface(ITypeSymbol t)
             {
                 if (t is INamedTypeSymbol nt && nt.IsGenericType && nt.Name == "IProxy" && nt.TypeArguments.Length == 1)
@@ -41,7 +60,6 @@ namespace NTypeForge.SourceGenerator
 
             if (IsProxyInterface(type))
             {
-                isProxy = true;
                 return ((INamedTypeSymbol)type).TypeArguments[0];
             }
 
@@ -49,7 +67,6 @@ namespace NTypeForge.SourceGenerator
             {
                 if (IsProxyInterface(iface))
                 {
-                    isProxy = true;
                     return ((INamedTypeSymbol)iface).TypeArguments[0];
                 }
             }
@@ -83,13 +100,12 @@ namespace NTypeForge.SourceGenerator
                     var argType = semanticModel.GetTypeInfo(instanceExpr).Type;
                     if (argType != null)
                     {
-                        var underlyingType = GetUnderlyingType(argType, out bool isProxy);
+                        var underlyingType = GetUnderlyingType(argType);
                         if (targetInterface.TypeKind == TypeKind.Interface &&
                             (underlyingType.TypeKind == TypeKind.Class || underlyingType.TypeKind == TypeKind.Struct || underlyingType.TypeKind == TypeKind.Interface))
                         {
                             return new CandidateInvocation(
                                 invocation,
-                                "Duck",
                                 argType,
                                 argType,
                                 underlyingType,
@@ -97,7 +113,6 @@ namespace NTypeForge.SourceGenerator
                                 0,
                                 resolvedMethod,
                                 false,
-                                isProxy,
                                 true
                             );
                         }
@@ -125,7 +140,7 @@ namespace NTypeForge.SourceGenerator
 
                     if (argType == null || paramType == null) continue;
 
-                    var underlyingType = GetUnderlyingType(argType, out bool isProxy);
+                    var underlyingType = GetUnderlyingType(argType);
 
                     var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
                     if (!conversion.Exists || !conversion.IsImplicit)
@@ -135,7 +150,6 @@ namespace NTypeForge.SourceGenerator
                         {
                             return new CandidateInvocation(
                                 invocation,
-                                candidate.Name,
                                 targetType,
                                 argType,
                                 underlyingType,
@@ -143,7 +157,6 @@ namespace NTypeForge.SourceGenerator
                                 i,
                                 candidate,
                                 candidate.IsStatic,
-                                isProxy,
                                 false
                             );
                         }
@@ -182,6 +195,23 @@ namespace NTypeForge.SourceGenerator
 
             foreach (var candidate in candidates)
             {
+                // Properties/events/indexers can't be proxied; generating anyway would
+                // produce a proxy that fails CS0535. Skip it (the original call error
+                // stands), and for an explicit Duck<T> call surface a clear diagnostic.
+                var unsupported = FindUnsupportedInterfaceMember(candidate.ExpectedInterfaceType);
+                if (unsupported != null)
+                {
+                    if (candidate.IsDuckCall)
+                    {
+                        context.ReportDiagnostic(Diagnostic.Create(
+                            UnsupportedInterfaceMember,
+                            candidate.Invocation.GetLocation(),
+                            candidate.ExpectedInterfaceType.ToDisplayString(),
+                            unsupported.Name));
+                    }
+                    continue;
+                }
+
                 var matchResult = CheckStructuralMatch(candidate.UnderlyingType, candidate.ExpectedInterfaceType);
                 if (matchResult.IsMatch)
                 {
@@ -192,16 +222,24 @@ namespace NTypeForge.SourceGenerator
                         concreteTypes.Add(candidate.UnderlyingType);
                     }
                 }
+                else if (candidate.IsDuckCall)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        NoStructuralMatch,
+                        candidate.Invocation.GetLocation(),
+                        candidate.UnderlyingType.ToDisplayString(),
+                        candidate.ExpectedInterfaceType.ToDisplayString()));
+                }
             }
 
             if (allExtensions.Count == 0) return;
 
             // Collect all possible concrete-to-interface matches among involved types
             var possibleMatches = new Dictionary<ITypeSymbol, List<(ITypeSymbol Concrete, StructuralMatchResult Match)>>(SymbolEqualityComparer.Default);
-            foreach (var iface in interfaces)
+            foreach (var iface in interfaces.OrderBy(StableKey, StringComparer.Ordinal))
             {
                 var list = new List<(ITypeSymbol, StructuralMatchResult)>();
-                foreach (var concrete in concreteTypes)
+                foreach (var concrete in concreteTypes.OrderBy(StableKey, StringComparer.Ordinal))
                 {
                     var match = CheckStructuralMatch(concrete, iface);
                     if (match.IsMatch)
@@ -229,7 +267,7 @@ namespace NTypeForge.SourceGenerator
             foreach (var item in allExtensions) AddProxy(item.Candidate.UnderlyingType, item.Candidate.ExpectedInterfaceType, item.MatchResult);
             foreach (var kvp in possibleMatches) foreach (var m in kvp.Value) AddProxy(m.Concrete, kvp.Key, m.Match);
 
-            foreach (var kvp in proxiesByNamespace)
+            foreach (var kvp in proxiesByNamespace.OrderBy(k => k.Key, StringComparer.Ordinal))
             {
                 var sb = new System.Text.StringBuilder();
                 sb.AppendLine("// <auto-generated/>");
@@ -238,7 +276,7 @@ namespace NTypeForge.SourceGenerator
                 sb.AppendLine();
                 sb.AppendLine($"namespace {kvp.Key}");
                 sb.AppendLine("{");
-                foreach (var item in kvp.Value)
+                foreach (var item in kvp.Value.OrderBy(x => StableKey(x.Underlying) + "|" + StableKey(x.Interface), StringComparer.Ordinal))
                 {
                     GenerateProxyStruct(sb, item.Underlying, item.Interface, item.Match, GetProxyStructName(item.Underlying, item.Interface));
                 }
@@ -247,7 +285,7 @@ namespace NTypeForge.SourceGenerator
             }
 
             // Generate extensions
-            var extensionsByTarget = new Dictionary<ITypeSymbol?, List<ExtensionItem>>(SymbolEqualityComparer.Default);
+            var extensionsByTarget = new Dictionary<ITypeSymbol, List<ExtensionItem>>(SymbolEqualityComparer.Default);
             foreach (var item in allExtensions)
             {
                 if (!extensionsByTarget.TryGetValue(item.Candidate.TargetType, out var list)) {
@@ -257,12 +295,12 @@ namespace NTypeForge.SourceGenerator
                 list.Add(item);
             }
 
-            foreach (var kvp in extensionsByTarget)
+            foreach (var kvp in extensionsByTarget.OrderBy(k => StableKey(k.Key), StringComparer.Ordinal))
             {
                 var targetType = kvp.Key;
-                var targetNamespace = (targetType?.ContainingNamespace.IsGlobalNamespace ?? true) ? "NTypeForge" : targetType.ContainingNamespace.ToDisplayString();
-                var targetFullName = targetType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? "object";
-                var extensionClassName = targetType != null ? $"{targetType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat).Replace(".", "_").Replace("<", "_").Replace(">", "_")}_DuckTypingExtensions" : "Global_DuckTypingExtensions";
+                var targetNamespace = targetType.ContainingNamespace.IsGlobalNamespace ? "NTypeForge" : targetType.ContainingNamespace.ToDisplayString();
+                var targetFullName = targetType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                var extensionClassName = $"{targetType.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat).Replace(".", "_").Replace("<", "_").Replace(">", "_")}_DuckTypingExtensions";
 
                 var sb = new System.Text.StringBuilder();
                 sb.AppendLine("// <auto-generated/>");
@@ -303,12 +341,15 @@ namespace NTypeForge.SourceGenerator
 
                         sb.AppendLine($"                if (typeof(T) == typeof({ifaceFullName}))");
                         sb.AppendLine("                {");
-                        // Unbox checks: if the target is already a proxy, rewrap the underlying instance.
-                        if (possibleMatches.TryGetValue(candidate.ExpectedInterfaceType, out var matches)) {
+                        // Unwrap check: only when target is an interface can it actually be a
+                        // proxy that needs rewrapping. For a concrete target the unwrap branch
+                        // is always taken trivially, so we skip it and wrap directly.
+                        if (targetType.TypeKind == TypeKind.Interface &&
+                            possibleMatches.TryGetValue(candidate.ExpectedInterfaceType, out var matches)) {
                             foreach (var m in matches) {
                                 var cName = m.Concrete.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
                                 var pName = $"{(m.Concrete.ContainingNamespace.IsGlobalNamespace ? "NTypeForge" : m.Concrete.ContainingNamespace.ToDisplayString())}.{GetProxyStructName(m.Concrete, candidate.ExpectedInterfaceType)}";
-                                sb.AppendLine($"                    if (target.Unbox<{cName}>() is {cName} c_{m.Concrete.Name}) return (T)(object)new {pName}(c_{m.Concrete.Name});");
+                                sb.AppendLine($"                    if (target.TryUnbox<{cName}>(out var c_{m.Concrete.Name})) return (T)(object)new {pName}(c_{m.Concrete.Name});");
                             }
                         }
                         sb.AppendLine($"                    return (T)(object)new {proxyFullName}(({candidate.UnderlyingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)})target);");
@@ -356,7 +397,7 @@ namespace NTypeForge.SourceGenerator
                                         return $"{refKind}{p.Name}";
                                     }));
                                     var receiver = candidate.IsStatic ? targetFullName : "target";
-                                    sb.AppendLine($"                if ({argName}.Unbox<{cName}>() is {cName} c_{m.Concrete.Name}) {{");
+                                    sb.AppendLine($"                if ({argName}.TryUnbox<{cName}>(out var c_{m.Concrete.Name})) {{");
                                     if (originalMethod.ReturnType.SpecialType == SpecialType.System_Void) sb.AppendLine($"                    {receiver}.{originalMethod.Name}({callArgsUnboxed}); return;");
                                     else sb.AppendLine($"                    return {receiver}.{originalMethod.Name}({callArgsUnboxed});");
                                     sb.AppendLine("                }");
@@ -424,6 +465,20 @@ namespace NTypeForge.SourceGenerator
             sb.AppendLine();
         }
 
+        // Returns the first interface member that cannot be proxied (property, event,
+        // or indexer). Accessor methods are reported via their owning property/event.
+        private static ISymbol? FindUnsupportedInterfaceMember(ITypeSymbol interfaceType)
+        {
+            foreach (var member in interfaceType.GetMembers())
+            {
+                if (member is IPropertySymbol || member is IEventSymbol)
+                {
+                    return member;
+                }
+            }
+            return null;
+        }
+
         private static StructuralMatchResult CheckStructuralMatch(ITypeSymbol sourceType, ITypeSymbol interfaceType)
         {
             var matchedMethods = new List<ProxyMethodInfo>();
@@ -459,6 +514,11 @@ namespace NTypeForge.SourceGenerator
 
             return true;
         }
+
+        // Stable, content-based ordering key so generated output does not depend on
+        // the (unspecified) iteration order of symbol-keyed hash sets/dictionaries.
+        private static string StableKey(ITypeSymbol type)
+            => type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 
         private static string GetProxyStructName(ITypeSymbol sourceType, ITypeSymbol interfaceType)
         {
