@@ -75,4 +75,24 @@ public class UnboxingTests
 
         Assert.Equal(10, result);
     }
+
+    // Regression: ducking the SAME concrete type to two DIFFERENT interfaces previously
+    // generated two colliding Duck<T>() methods (CS0111). A single typeof(T)-dispatching
+    // method must be emitted instead.
+    [Fact]
+    public void CanDuckSameTypeToMultipleInterfaces()
+    {
+        var myMath = new MyMath();
+
+        IMath asMath = myMath.Duck<IMath>();
+        IMathOther asOther = myMath.Duck<IMathOther>();
+
+        Assert.Equal(7, asMath.Add(3, 4));
+        Assert.Equal(7, asOther.Add(3, 4));
+
+        Assert.True(asMath is IProxy<MyMath>);
+        Assert.True(asOther is IProxy<MyMath>);
+        Assert.Same(myMath, ((IProxy<MyMath>)asMath).Inner);
+        Assert.Same(myMath, ((IProxy<MyMath>)asOther).Inner);
+    }
 }

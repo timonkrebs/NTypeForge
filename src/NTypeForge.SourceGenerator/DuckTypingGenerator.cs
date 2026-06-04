@@ -277,33 +277,56 @@ namespace NTypeForge.SourceGenerator
                 sb.AppendLine("        {");
 
                 var generatedMethods = new HashSet<string>();
+
+                // Emit a single Duck<T>() per target type that dispatches on typeof(T).
+                // One method per interface would share the identical Duck<T>() signature
+                // (return type and generic constraints don't participate in overloading)
+                // and collide with CS0111 when a type is ducked to more than one interface.
+                var duckCandidates = new List<CandidateInvocation>();
+                var seenDuckInterfaces = new HashSet<ITypeSymbol>(SymbolEqualityComparer.Default);
+                foreach (var item in kvp.Value)
+                {
+                    if (item.Candidate.IsDuckCall && seenDuckInterfaces.Add(item.Candidate.ExpectedInterfaceType))
+                        duckCandidates.Add(item.Candidate);
+                }
+
+                if (duckCandidates.Count > 0)
+                {
+                    sb.AppendLine("            public T Duck<T>() where T : class");
+                    sb.AppendLine("            {");
+                    foreach (var candidate in duckCandidates)
+                    {
+                        var ifaceFullName = candidate.ExpectedInterfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                        var proxyStructName = GetProxyStructName(candidate.UnderlyingType, candidate.ExpectedInterfaceType);
+                        var proxyNamespace = candidate.UnderlyingType.ContainingNamespace.IsGlobalNamespace ? "NTypeForge" : candidate.UnderlyingType.ContainingNamespace.ToDisplayString();
+                        var proxyFullName = $"{proxyNamespace}.{proxyStructName}";
+
+                        sb.AppendLine($"                if (typeof(T) == typeof({ifaceFullName}))");
+                        sb.AppendLine("                {");
+                        // Unbox checks: if the target is already a proxy, rewrap the underlying instance.
+                        if (possibleMatches.TryGetValue(candidate.ExpectedInterfaceType, out var matches)) {
+                            foreach (var m in matches) {
+                                var cName = m.Concrete.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
+                                var pName = $"{(m.Concrete.ContainingNamespace.IsGlobalNamespace ? "NTypeForge" : m.Concrete.ContainingNamespace.ToDisplayString())}.{GetProxyStructName(m.Concrete, candidate.ExpectedInterfaceType)}";
+                                sb.AppendLine($"                    if (target.Unbox<{cName}>() is {cName} c_{m.Concrete.Name}) return (T)(object)new {pName}(c_{m.Concrete.Name});");
+                            }
+                        }
+                        sb.AppendLine($"                    return (T)(object)new {proxyFullName}(({candidate.UnderlyingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)})target);");
+                        sb.AppendLine("                }");
+                    }
+                    sb.AppendLine("                throw new global::System.InvalidOperationException(\"NTypeForge: no proxy was generated for \" + typeof(T));");
+                    sb.AppendLine("            }");
+                }
+
                 foreach (var item in kvp.Value)
                 {
                     var candidate = item.Candidate;
+                    if (candidate.IsDuckCall) continue;
+
                     var proxyStructName = GetProxyStructName(candidate.UnderlyingType, candidate.ExpectedInterfaceType);
                     var proxyNamespace = candidate.UnderlyingType.ContainingNamespace.IsGlobalNamespace ? "NTypeForge" : candidate.UnderlyingType.ContainingNamespace.ToDisplayString();
                     var proxyFullName = $"{proxyNamespace}.{proxyStructName}";
 
-                    if (candidate.IsDuckCall)
-                    {
-                        var methodSig = $"public {candidate.ExpectedInterfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} Duck<T>() where T : {candidate.ExpectedInterfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}";
-                        if (generatedMethods.Add(methodSig))
-                        {
-                            sb.AppendLine($"            public {candidate.ExpectedInterfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)} Duck<T>() where T : {candidate.ExpectedInterfaceType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)}");
-                            sb.AppendLine("            {");
-                            // Unbox checks
-                            if (possibleMatches.TryGetValue(candidate.ExpectedInterfaceType, out var matches)) {
-                                foreach (var m in matches) {
-                                    var cName = m.Concrete.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-                                    var pName = $"{(m.Concrete.ContainingNamespace.IsGlobalNamespace ? "NTypeForge" : m.Concrete.ContainingNamespace.ToDisplayString())}.{GetProxyStructName(m.Concrete, candidate.ExpectedInterfaceType)}";
-                                    sb.AppendLine($"                if (target.Unbox<{cName}>() is {cName} c_{m.Concrete.Name}) return new {pName}(c_{m.Concrete.Name});");
-                                }
-                            }
-                            sb.AppendLine($"                return new {proxyFullName}(({candidate.UnderlyingType.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)})target);");
-                            sb.AppendLine("            }");
-                        }
-                    }
-                    else
                     {
                         var originalMethod = candidate.OriginalMethod;
                         var methodParams = string.Join(", ", originalMethod.Parameters.Select((p, idx) => {
