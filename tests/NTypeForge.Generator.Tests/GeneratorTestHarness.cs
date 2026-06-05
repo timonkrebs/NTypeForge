@@ -53,6 +53,27 @@ internal static class GeneratorTestHarness
             parseOptions: ParseOptions,
             optionsProvider: null);
 
+    // Compiles `source`, exposed so caching tests can build an evolved second compilation.
+    public static CSharpCompilation Compile(string source) => CreateCompilation(source);
+
+    // A driver that records per-step run reasons (Cached/Modified/...), so a test can assert the
+    // source-output stage is reused when the candidate set is unchanged.
+    public static GeneratorDriver CreateStepTrackingDriver()
+        => CSharpGeneratorDriver.Create(
+            generators: new[] { new DuckTypingGenerator().AsSourceGenerator() },
+            additionalTexts: null,
+            parseOptions: ParseOptions,
+            optionsProvider: null,
+            driverOptions: new GeneratorDriverOptions(IncrementalGeneratorOutputKind.None, trackIncrementalGeneratorSteps: true));
+
+    // The run reasons of every source-output step on the most recent run of `driver`.
+    public static IEnumerable<IncrementalStepRunReason> OutputStepReasons(GeneratorDriver driver)
+        => driver.GetRunResult().Results
+            .SelectMany(r => r.TrackedOutputSteps)
+            .SelectMany(kvp => kvp.Value)
+            .SelectMany(step => step.Outputs)
+            .Select(o => o.Reason);
+
     private static CSharpCompilation CreateCompilation(string source)
     {
         var syntaxTree = CSharpSyntaxTree.ParseText(source, ParseOptions);

@@ -117,6 +117,114 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
+    // A closed generic interface target renders as `IBox<int>`; angle brackets must survive into a
+    // valid proxy name and a valid `: IBox<int>` base list.
+    [Fact]
+    public void ClosedGenericInterfaceTarget_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IBox<TValue> { TValue Get(); }
+                public class IntBox { public int Get() => 0; }
+                public class C { public void M() { var x = new IntBox().Duck<IBox<int>>(); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Diamond inheritance: the proxy must implement members from both base interfaces plus the
+    // derived one, exactly once, or it fails to compile (CS0535 / CS0111).
+    [Fact]
+    public void DiamondInterfaceInheritance_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ILeft { int Left(); }
+                public interface IRight { int Right(); }
+                public interface IDiamond : ILeft, IRight { int Tip(); }
+                public class Impl { public int Left() => 1; public int Right() => 2; public int Tip() => 3; }
+                public class C { public void M() { var x = new Impl().Duck<IDiamond>(); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // An interface with no members structurally matches anything; the emitted proxy has no
+    // forwarded methods but must still be valid (and implement IProxy<T>).
+    [Fact]
+    public void EmptyMarkerInterface_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IMarker { }
+                public class Thing { public int Whatever() => 1; }
+                public class C { public void M() { var x = new Thing().Duck<IMarker>(); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // #6 companion: an interface event is also an unsupported member and must report NTF002 without
+    // emitting broken code.
+    [Fact]
+    public void InterfaceEvent_ReportsNTF002_AndEmitsNoBrokenCode()
+    {
+        const string source = """
+            using NTypeForge;
+            using System;
+            namespace T
+            {
+                public interface IPublisher { event Action Fired; int Do(); }
+                public class Pub { public event Action Fired; public int Do() => 2; }
+                public class C { public void M() { var x = new Pub().Duck<IPublisher>(); } }
+            }
+            """;
+
+        Assert.True(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Stronger than the same-input determinism check: the same types/ducks declared in a different
+    // textual order must still produce byte-identical output, since everything is ordered by stable
+    // fully-qualified keys rather than declaration order.
+    [Fact]
+    public void Generator_OutputIsIndependentOfDeclarationOrder()
+    {
+        const string orderA = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IA { int Go(); }
+                public interface IB { int Go(); }
+                public class Impl { public int Go() => 1; }
+                public class C { public void M() { var a = new Impl().Duck<IA>(); var b = new Impl().Duck<IB>(); } }
+            }
+            """;
+        const string orderB = """
+            using NTypeForge;
+            namespace T
+            {
+                public class C { public void M() { var b = new Impl().Duck<IB>(); var a = new Impl().Duck<IA>(); } }
+                public class Impl { public int Go() => 1; }
+                public interface IB { int Go(); }
+                public interface IA { int Go(); }
+            }
+            """;
+
+        Assert.Equal(
+            GeneratorTestHarness.GetGeneratedText(orderA),
+            GeneratorTestHarness.GetGeneratedText(orderB));
+    }
+
     // #7: the equatable pipeline must stay deterministic — same input, byte-identical output.
     [Fact]
     public void Generator_ProducesIdenticalOutputAcrossRuns()

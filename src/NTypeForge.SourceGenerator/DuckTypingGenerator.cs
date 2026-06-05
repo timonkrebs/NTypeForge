@@ -491,7 +491,9 @@ namespace NTypeForge.SourceGenerator
 
             foreach (var kvp in extensionsByTarget.OrderBy(k => k.Key, StringComparer.Ordinal))
             {
-                var items = kvp.Value;
+                // Order by a location-independent content key so the emitted Duck<T> branches and
+                // forwarding methods don't depend on the order the duck sites appear in source.
+                var items = kvp.Value.OrderBy(EmitOrderKey, StringComparer.Ordinal).ToList();
                 var first = items[0];
                 var targetNamespace = first.TargetNamespace;
                 var targetFullName = first.TargetFq;
@@ -522,6 +524,17 @@ namespace NTypeForge.SourceGenerator
                 context.AddSource($"{targetNamespace.Replace(".", "_")}_{extensionClassName}.g.cs", sb.ToString());
             }
         }
+
+        // Stable, location-independent ordering key for a candidate's emitted contribution: the
+        // forwarded method name + parameter shape, then the interface and underlying types. Duck
+        // calls (empty method name / parameters) collapse to ordering by interface.
+        private static string EmitOrderKey(CandidateModel c)
+            => string.Join("|",
+                c.OriginalMethodName,
+                string.Join(",", c.OriginalParameters.Select(p => p.Key)),
+                c.ArgumentFq,
+                c.InterfaceFq,
+                c.UnderlyingFq);
 
         // Emit a single Duck<T>() per target type that dispatches on typeof(T). One method per
         // interface would share the identical Duck<T>() signature (return type and generic
