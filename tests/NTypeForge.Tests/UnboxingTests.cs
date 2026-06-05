@@ -23,6 +23,9 @@ public class MathConsumer
 {
     public int Consume(IMath math, int a, int b) => math.Add(a, b);
     public int ConsumeOther(IMathOther math, int a, int b) => math.Add(a, b);
+
+    // Returns the (possibly re-wrapped) argument so a test can inspect how deeply it was wrapped.
+    public IMathOther EchoOther(IMathOther math) => math;
 }
 
 public class UnboxingTests
@@ -74,6 +77,26 @@ public class UnboxingTests
         int result = consumer.ConsumeOther(proxy1, 5, 5);
 
         Assert.Equal(10, result);
+    }
+
+    // The numeric result above passes even if the proxy is double-wrapped (the inner proxy still
+    // forwards correctly), so it can't actually prove no double-wrap. This inspects the wrapping
+    // depth: the re-wrapped argument must be a single-level proxy over MyMath, i.e. its Inner is
+    // the original instance, not another proxy.
+    [Fact]
+    public void MethodCall_ReWrapsToSingleLevelProxy_NotProxyOverProxy()
+    {
+        var myMath = new MyMath();
+        var consumer = new MathConsumer();
+
+        IMath proxy1 = myMath.Duck<IMath>();
+
+        IMathOther rewrapped = consumer.EchoOther(proxy1);
+
+        // A double-wrap would implement IProxy<IMath> (a proxy over the proxy); only a correct
+        // single-level re-wrap implements IProxy<MyMath> with the original instance as Inner.
+        var asProxy = Assert.IsAssignableFrom<IProxy<MyMath>>(rewrapped);
+        Assert.Same(myMath, asProxy.Inner);
     }
 
     // Regression: ducking the SAME concrete type to two DIFFERENT interfaces previously

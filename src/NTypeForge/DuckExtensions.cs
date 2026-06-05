@@ -4,7 +4,7 @@ namespace NTypeForge;
 
 public static class DuckExtensions
 {
-    public static T? Unbox<T>(this object proxy)
+    public static T? Unbox<T>(this object? proxy)
         => proxy.TryUnbox<T>(out var value) ? value : default;
 
     // Walks the proxy chain and reports whether a T was found via an explicit

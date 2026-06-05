@@ -79,6 +79,22 @@ public class TryUnboxTests
         Assert.Null(value);
     }
 
+    // Models the cross-assembly double-wrap shape: a real generated proxy (IProxy<MyMath>) wrapped
+    // by another proxy layer. The compile-time unwrap can't prevent this when the concrete type is
+    // unknown to the wrapping compilation, but TryUnbox/Unbox walk the whole chain, so the original
+    // instance is always recoverable - the only casualty is single-level IProxy<T>.Inner.
+    [Fact]
+    public void Unbox_RecoversConcrete_ThroughProxyOverProxy()
+    {
+        var myMath = new MyMath();
+        IMath inner = myMath.Duck<IMath>();    // genuine generated proxy over MyMath
+        object doubled = new FakeProxy(inner); // an extra wrapping layer, as a re-wrap would add
+
+        Assert.True(doubled.TryUnbox<MyMath>(out var recovered));
+        Assert.Same(myMath, recovered);
+        Assert.Same(myMath, doubled.Unbox<MyMath>());
+    }
+
     [Fact]
     public void Unbox_Hit_ReturnsInner()
     {
@@ -95,5 +111,15 @@ public class TryUnboxTests
 
         Assert.Null(proxy.Unbox<MyMath>()); // reference-type miss => null
         Assert.Equal(0, proxy.Unbox<int>()); // value-type miss => default (documented footgun)
+    }
+
+    [Fact]
+    public void Unbox_Null_ReturnsDefault()
+    {
+        // Unbox is declared on `object?` and delegates to the null-tolerant TryUnbox, so a null
+        // receiver is a miss, not a NullReferenceException.
+        object? nothing = null;
+
+        Assert.Null(nothing.Unbox<MyMath>());
     }
 }
