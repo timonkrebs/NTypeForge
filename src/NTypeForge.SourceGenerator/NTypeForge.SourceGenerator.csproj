@@ -8,6 +8,8 @@
     <IsRoslynComponent>true</IsRoslynComponent>
     <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
     <CompilerGeneratedFilesOutputPath>Generated</CompilerGeneratedFilesOutputPath>
+    <!-- RS2008: analyzer release tracking is for shipped analyzer packages; not applicable here. -->
+    <NoWarn>$(NoWarn);RS2008</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

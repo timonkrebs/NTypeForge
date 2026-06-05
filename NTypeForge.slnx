@@ -10,5 +10,6 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/NTypeForge.Tests/NTypeForge.Tests.csproj" />
+    <Project Path="tests/NTypeForge.Generator.Tests/NTypeForge.Generator.Tests.csproj" />
   </Folder>
 </Solution>

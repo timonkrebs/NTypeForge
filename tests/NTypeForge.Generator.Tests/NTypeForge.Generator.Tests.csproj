@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -13,6 +13,9 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <!-- Drives the generator over in-memory snippets. Pinned to a Roslyn that understands C# 14
+         `extension` members so the harness can compile the generator's emitted output. -->
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -20,8 +23,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Reference the generator as a normal assembly so the harness can instantiate it
+         directly; reference NTypeForge so snippets can bind Duck<T>/IProxy. -->
     <ProjectReference Include="..\..\src\NTypeForge\NTypeForge.csproj" />
-    <ProjectReference Include="..\..\src\NTypeForge.SourceGenerator\NTypeForge.SourceGenerator.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\NTypeForge.SourceGenerator\NTypeForge.SourceGenerator.csproj" />
   </ItemGroup>
 
 </Project>
