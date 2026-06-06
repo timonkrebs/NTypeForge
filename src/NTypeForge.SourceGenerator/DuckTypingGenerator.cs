@@ -24,7 +24,7 @@ namespace NTypeForge.SourceGenerator
         private static readonly DiagnosticDescriptor UnsupportedInterfaceMember = new DiagnosticDescriptor(
             id: "NTF002",
             title: "Unsupported interface member for duck typing",
-            messageFormat: "Interface '{0}' cannot be duck-typed: member '{1}' is not a supported member.",
+            messageFormat: "Interface '{0}' cannot be duck-typed: member '{1}' is not a supported member",
             category: "NTypeForge",
             defaultSeverity: DiagnosticSeverity.Error,
             isEnabledByDefault: true);
@@ -403,9 +403,13 @@ namespace NTypeForge.SourceGenerator
             {
                 foreach (var member in iface.GetMembers())
                 {
-                    if (member.IsStatic && member is IMethodSymbol { MethodKind: MethodKind.Ordinary } m && m.IsAbstract)
+                    // Instance ducking cannot proxy static members that require implementation.
+                    // While DIMs are allowed, any required static member must be flagged.
+                    if (member.IsStatic && member.IsAbstract && (member is IMethodSymbol { MethodKind: MethodKind.Ordinary } ||
+                                           member is IPropertySymbol ||
+                                           member is IEventSymbol))
                     {
-                         return member.Name; // Static abstract not supported for instance ducking
+                        return member.Name;
                     }
                 }
             }
@@ -876,8 +880,8 @@ namespace NTypeForge.SourceGenerator
         private static string ProxyFullName(string underlyingNamespace, string underlyingMinimalName, string interfaceMinimalName)
             => $"global::{underlyingNamespace}.{GetProxyStructName(underlyingMinimalName, interfaceMinimalName)}";
 
-        private static string RefPrefix(RefKind refKind)
-            => refKind switch { RefKind.Ref => "ref ", RefKind.Out => "out ", RefKind.In => "in ", _ => "" };
+        private static string RefPrefix(Microsoft.CodeAnalysis.RefKind refKind)
+             => refKind switch { Microsoft.CodeAnalysis.RefKind.Ref => "ref ", Microsoft.CodeAnalysis.RefKind.Out => "out ", Microsoft.CodeAnalysis.RefKind.In => "in ", _ => "" };
 
         private static string ReturnStatement(bool returnsVoid, string call)
             => returnsVoid ? $"{call};" : $"return {call};";

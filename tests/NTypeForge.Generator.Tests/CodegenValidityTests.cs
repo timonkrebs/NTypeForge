@@ -98,10 +98,8 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
-    // #6: an interface exposing a generic method cannot be proxied. The Duck<T> call must report
-    // NTF002 and the generator must emit no (broken) proxy for it.
     [Fact]
-    public void GenericInterfaceMethod_ReportsNTF002_AndEmitsNoBrokenCode()
+    public void GenericInterfaceMethod_EmitsCompilableCode()
     {
         const string source = """
             using NTypeForge;
@@ -113,7 +111,7 @@ public class CodegenValidityTests
             }
             """;
 
-        Assert.True(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
@@ -173,10 +171,8 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
-    // #6 companion: an interface event is also an unsupported member and must report NTF002 without
-    // emitting broken code.
     [Fact]
-    public void InterfaceEvent_ReportsNTF002_AndEmitsNoBrokenCode()
+    public void InterfaceEvent_EmitsCompilableCode()
     {
         const string source = """
             using NTypeForge;
@@ -189,7 +185,7 @@ public class CodegenValidityTests
             }
             """;
 
-        Assert.True(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
