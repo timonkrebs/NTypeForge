@@ -46,9 +46,13 @@ namespace NTypeForge.SourceGenerator.Models
         public bool OriginalReturnsVoid { get; }
         public IReadOnlyList<ParamSig> OriginalParameters { get; }
 
-        // Methods the proxy must implement (interface + inherited, deduped). Also used as the
+        // Members the proxy must implement (interface + inherited, deduped). Also used as the
         // structural requirement when matching this interface against other concrete types.
-        public IReadOnlyList<MethodSig> InterfaceRequirements { get; }
+        public IReadOnlyList<MethodSig> MethodRequirements { get; }
+        public IReadOnlyList<PropertySig> PropertyRequirements { get; }
+        public IReadOnlyList<IndexerSig> IndexerRequirements { get; }
+        public IReadOnlyList<EventSig> EventRequirements { get; }
+
         // CompatKeys of the underlying type's directly-declared methods, for matching it against
         // other interfaces' requirements.
         public IReadOnlyList<string> UnderlyingSurfaceCompatKeys { get; }
@@ -74,7 +78,11 @@ namespace NTypeForge.SourceGenerator.Models
             string interfaceFq, string interfaceMinimalName,
             int argumentIndex, bool isStatic, bool isDuckCall,
             string originalMethodName, string originalReturnTypeFq, bool originalReturnsVoid, IReadOnlyList<ParamSig> originalParameters,
-            IReadOnlyList<MethodSig> interfaceRequirements, IReadOnlyList<string> underlyingSurfaceCompatKeys,
+            IReadOnlyList<MethodSig> methodRequirements,
+            IReadOnlyList<PropertySig> propertyRequirements,
+            IReadOnlyList<IndexerSig> indexerRequirements,
+            IReadOnlyList<EventSig> eventRequirements,
+            IReadOnlyList<string> underlyingSurfaceCompatKeys,
             bool isSelfMatch, string? unsupportedMemberName,
             string? diagFilePath, TextSpan diagSpan, LinePositionSpan diagLineSpan)
         {
@@ -98,7 +106,10 @@ namespace NTypeForge.SourceGenerator.Models
             OriginalReturnTypeFq = originalReturnTypeFq;
             OriginalReturnsVoid = originalReturnsVoid;
             OriginalParameters = originalParameters;
-            InterfaceRequirements = interfaceRequirements;
+            MethodRequirements = methodRequirements;
+            PropertyRequirements = propertyRequirements;
+            IndexerRequirements = indexerRequirements;
+            EventRequirements = eventRequirements;
             UnderlyingSurfaceCompatKeys = underlyingSurfaceCompatKeys;
             IsSelfMatch = isSelfMatch;
             UnsupportedMemberName = unsupportedMemberName;
@@ -111,14 +122,17 @@ namespace NTypeForge.SourceGenerator.Models
         private string BuildKey()
         {
             var prms = string.Join(",", OriginalParameters.Select(p => p.Key));
-            var reqs = string.Join(",", InterfaceRequirements.Select(m => m.CompatKey));
+            var reqs = string.Join(",", MethodRequirements.Select(m => m.CompatKey));
+            var props = string.Join(",", PropertyRequirements.Select(p => p.CompatKey));
+            var idxs = string.Join(",", IndexerRequirements.Select(i => i.CompatKey));
+            var evts = string.Join(",", EventRequirements.Select(e => e.CompatKey));
             var surface = string.Join(",", UnderlyingSurfaceCompatKeys);
             return string.Join("|",
                 TargetFq, TargetIsInterface, ArgumentFq, ArgumentIsInterface,
                 UnderlyingFq, UnderlyingIsInterface, UnderlyingBaseDepth,
                 InterfaceFq, ArgumentIndex, IsStatic, IsDuckCall,
                 OriginalMethodName, OriginalReturnTypeFq, OriginalReturnsVoid, prms,
-                reqs, surface, IsSelfMatch, UnsupportedMemberName ?? "",
+                reqs, props, idxs, evts, surface, IsSelfMatch, UnsupportedMemberName ?? "",
                 DiagFilePath ?? "", DiagSpan.Start, DiagSpan.Length);
         }
 

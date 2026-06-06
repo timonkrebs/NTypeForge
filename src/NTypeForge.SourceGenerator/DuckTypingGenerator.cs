@@ -24,7 +24,7 @@ namespace NTypeForge.SourceGenerator
         private static readonly DiagnosticDescriptor UnsupportedInterfaceMember = new DiagnosticDescriptor(
             id: "NTF002",
             title: "Unsupported interface member for duck typing",
-            messageFormat: "Interface '{0}' cannot be duck-typed: member '{1}' is not a supported member. NTypeForge only supports non-generic methods.",
+            messageFormat: "Interface '{0}' cannot be duck-typed: member '{1}' is not a supported member.",
             category: "NTypeForge",
             defaultSeverity: DiagnosticSeverity.Error,
             isEnabledByDefault: true);
@@ -185,10 +185,19 @@ namespace NTypeForge.SourceGenerator
             bool isDuckCall,
             IMethodSymbol? originalMethod)
         {
-            var requirements = BuildInterfaceRequirements(interfaceType);
+            var methodRequirements = BuildMethodRequirements(interfaceType);
+            var propertyRequirements = BuildPropertyRequirements(interfaceType);
+            var indexerRequirements = BuildIndexerRequirements(interfaceType);
+            var eventRequirements = BuildEventRequirements(interfaceType);
+
             var surface = BuildSurfaceCompatKeys(underlyingType);
             var surfaceSet = new HashSet<string>(surface, StringComparer.Ordinal);
-            var isSelfMatch = requirements.All(r => surfaceSet.Contains(r.CompatKey));
+
+            bool isSelfMatch = methodRequirements.All(r => surfaceSet.Contains(r.CompatKey)) &&
+                               propertyRequirements.All(r => surfaceSet.Contains(r.CompatKey)) &&
+                               indexerRequirements.All(r => surfaceSet.Contains(r.CompatKey)) &&
+                               eventRequirements.All(r => surfaceSet.Contains(r.CompatKey));
+
             var unsupported = FindUnsupportedInterfaceMemberName(interfaceType);
 
             var originalParams = originalMethod == null
@@ -218,7 +227,10 @@ namespace NTypeForge.SourceGenerator
                 originalReturnTypeFq: originalMethod == null ? "" : Fq(originalMethod.ReturnType),
                 originalReturnsVoid: originalMethod != null && originalMethod.ReturnType.SpecialType == SpecialType.System_Void,
                 originalParameters: originalParams,
-                interfaceRequirements: requirements,
+                methodRequirements: methodRequirements,
+                propertyRequirements: propertyRequirements,
+                indexerRequirements: indexerRequirements,
+                eventRequirements: eventRequirements,
                 underlyingSurfaceCompatKeys: surface,
                 isSelfMatch: isSelfMatch,
                 unsupportedMemberName: unsupported,
@@ -235,13 +247,40 @@ namespace NTypeForge.SourceGenerator
                 m.Name,
                 Fq(m.ReturnType),
                 m.ReturnType.SpecialType == SpecialType.System_Void,
-                m.Parameters.Select(ToParamSig).ToList());
+                m.Parameters.Select(ToParamSig).ToList(),
+                m.Arity,
+                m.TypeParameters.Select(tp => tp.Name).ToList(),
+                m.TypeParameters.Select(GetConstraints).ToList()
+            );
 
-        // Methods the proxy must implement: the interface's own methods plus everything inherited
-        // from base interfaces (or the generated struct fails CS0535). The direct interface is
-        // scanned first so a re-declared (shadowing) member wins over an inherited one of the same
-        // signature; methods that differ only by return type collapse via DedupKey.
-        private static IReadOnlyList<MethodSig> BuildInterfaceRequirements(ITypeSymbol interfaceType)
+        private static string GetConstraints(ITypeParameterSymbol tp)
+        {
+            var constraints = new List<string>();
+            if (tp.HasReferenceTypeConstraint) constraints.Add("class");
+            if (tp.HasValueTypeConstraint) constraints.Add("struct");
+            if (tp.HasUnmanagedTypeConstraint) constraints.Add("unmanaged");
+            if (tp.HasNotNullConstraint) constraints.Add("notnull");
+            foreach (var t in tp.ConstraintTypes)
+            {
+                constraints.Add(Fq(t));
+            }
+            if (tp.HasConstructorConstraint) constraints.Add("new()");
+
+            return constraints.Count > 0
+                ? $"where {tp.Name} : {string.Join(", ", constraints)}"
+                : "";
+        }
+
+        private static PropertySig ToPropertySig(IPropertySymbol p)
+            => new PropertySig(p.Name, Fq(p.Type), p.GetMethod != null, p.SetMethod != null);
+
+        private static IndexerSig ToIndexerSig(IPropertySymbol p)
+            => new IndexerSig(Fq(p.Type), p.Parameters.Select(ToParamSig).ToList(), p.GetMethod != null, p.SetMethod != null);
+
+        private static EventSig ToEventSig(IEventSymbol e)
+            => new EventSig(e.Name, Fq(e.Type));
+
+        private static IReadOnlyList<MethodSig> BuildMethodRequirements(ITypeSymbol interfaceType)
         {
             var result = new List<MethodSig>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -249,7 +288,7 @@ namespace NTypeForge.SourceGenerator
             foreach (var method in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
                          .SelectMany(i => i.GetMembers())
                          .OfType<IMethodSymbol>()
-                         .Where(m => m.MethodKind == MethodKind.Ordinary && !m.IsGenericMethod))
+                         .Where(m => m.MethodKind == MethodKind.Ordinary))
             {
                 var sig = ToMethodSig(method);
                 if (seen.Add(sig.DedupKey))
@@ -261,33 +300,112 @@ namespace NTypeForge.SourceGenerator
             return result;
         }
 
-        // CompatKeys of the type's directly-declared ordinary methods. Matches the historical
-        // behavior of structural matching against `GetMembers` (inherited members on the concrete
-        // type are intentionally not considered).
-        private static IReadOnlyList<string> BuildSurfaceCompatKeys(ITypeSymbol type)
-            => type.GetMembers()
-                .OfType<IMethodSymbol>()
-                .Where(m => m.MethodKind == MethodKind.Ordinary && !m.IsGenericMethod)
-                .Select(m => ToMethodSig(m).CompatKey)
-                .Distinct(StringComparer.Ordinal)
-                .ToList();
+        private static IReadOnlyList<PropertySig> BuildPropertyRequirements(ITypeSymbol interfaceType)
+        {
+            var result = new List<PropertySig>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
 
-        // Returns the first interface member NTypeForge cannot proxy (property, event, or generic
-        // method), scanning the full transitive interface set. Accessor methods are reported via
-        // their owning property/event.
+            foreach (var prop in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
+                         .SelectMany(i => i.GetMembers())
+                         .OfType<IPropertySymbol>()
+                         .Where(p => !p.IsIndexer))
+            {
+                var sig = ToPropertySig(prop);
+                if (seen.Add(sig.Name))
+                {
+                    result.Add(sig);
+                }
+            }
+
+            return result;
+        }
+
+        private static IReadOnlyList<IndexerSig> BuildIndexerRequirements(ITypeSymbol interfaceType)
+        {
+            var result = new List<IndexerSig>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var prop in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
+                         .SelectMany(i => i.GetMembers())
+                         .OfType<IPropertySymbol>()
+                         .Where(p => p.IsIndexer))
+            {
+                var sig = ToIndexerSig(prop);
+                // Simple DedupKey for indexer by parameters
+                var pKey = string.Join(",", prop.Parameters.Select(x => $"{x.RefKind}:{Fq(x.Type)}"));
+                if (seen.Add(pKey))
+                {
+                    result.Add(sig);
+                }
+            }
+
+            return result;
+        }
+
+        private static IReadOnlyList<EventSig> BuildEventRequirements(ITypeSymbol interfaceType)
+        {
+            var result = new List<EventSig>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var evt in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
+                         .SelectMany(i => i.GetMembers())
+                         .OfType<IEventSymbol>())
+            {
+                var sig = ToEventSig(evt);
+                if (seen.Add(sig.Name))
+                {
+                    result.Add(sig);
+                }
+            }
+
+            return result;
+        }
+
+        // CompatKeys of the type's directly-declared members.
+        private static IReadOnlyList<string> BuildSurfaceCompatKeys(ITypeSymbol type)
+        {
+            var result = new List<string>();
+            foreach (var member in type.GetMembers())
+            {
+                if (member is IMethodSymbol method && method.MethodKind == MethodKind.Ordinary)
+                {
+                    result.Add(ToMethodSig(method).CompatKey);
+                }
+                else if (member is IPropertySymbol prop)
+                {
+                    if (prop.IsIndexer)
+                    {
+                        var sig = ToIndexerSig(prop);
+                        if (prop.GetMethod != null) result.Add(new IndexerSig(sig.TypeFq, sig.Parameters, true, false).CompatKey);
+                        if (prop.SetMethod != null) result.Add(new IndexerSig(sig.TypeFq, sig.Parameters, false, true).CompatKey);
+                        if (prop.GetMethod != null && prop.SetMethod != null) result.Add(sig.CompatKey);
+                    }
+                    else
+                    {
+                        var sig = ToPropertySig(prop);
+                        if (prop.GetMethod != null) result.Add(new PropertySig(sig.Name, sig.TypeFq, true, false).CompatKey);
+                        if (prop.SetMethod != null) result.Add(new PropertySig(sig.Name, sig.TypeFq, false, true).CompatKey);
+                        if (prop.GetMethod != null && prop.SetMethod != null) result.Add(sig.CompatKey);
+                    }
+                }
+                else if (member is IEventSymbol evt)
+                {
+                    result.Add(ToEventSig(evt).CompatKey);
+                }
+            }
+            return result.Distinct(StringComparer.Ordinal).ToList();
+        }
+
+        // Returns the first interface member NTypeForge cannot proxy.
         private static string? FindUnsupportedInterfaceMemberName(ITypeSymbol interfaceType)
         {
             foreach (var iface in new[] { interfaceType }.Concat(interfaceType.AllInterfaces))
             {
                 foreach (var member in iface.GetMembers())
                 {
-                    if (member is IPropertySymbol || member is IEventSymbol)
+                    if (member.IsStatic && member is IMethodSymbol { MethodKind: MethodKind.Ordinary } m && m.IsAbstract)
                     {
-                        return member.Name;
-                    }
-                    if (member is IMethodSymbol { MethodKind: MethodKind.Ordinary, IsGenericMethod: true } generic)
-                    {
-                        return generic.Name;
+                         return member.Name; // Static abstract not supported for instance ducking
                     }
                 }
             }
@@ -302,7 +420,10 @@ namespace NTypeForge.SourceGenerator
         {
             public string Fq = "";
             public string MinimalName = "";
-            public IReadOnlyList<MethodSig> Requirements = Array.Empty<MethodSig>();
+            public IReadOnlyList<MethodSig> MethodRequirements = Array.Empty<MethodSig>();
+            public IReadOnlyList<PropertySig> PropertyRequirements = Array.Empty<PropertySig>();
+            public IReadOnlyList<IndexerSig> IndexerRequirements = Array.Empty<IndexerSig>();
+            public IReadOnlyList<EventSig> EventRequirements = Array.Empty<EventSig>();
         }
 
         private sealed class ConcreteInfo
@@ -321,12 +442,23 @@ namespace NTypeForge.SourceGenerator
             public readonly string UnderlyingMinimalName;
             public readonly string InterfaceFq;
             public readonly string InterfaceMinimalName;
-            public readonly IReadOnlyList<MethodSig> Requirements;
+            public readonly IReadOnlyList<MethodSig> MethodRequirements;
+            public readonly IReadOnlyList<PropertySig> PropertyRequirements;
+            public readonly IReadOnlyList<IndexerSig> IndexerRequirements;
+            public readonly IReadOnlyList<EventSig> EventRequirements;
 
-            public ProxyDecl(string uFq, string uNs, string uMin, string iFq, string iMin, IReadOnlyList<MethodSig> reqs)
+            public ProxyDecl(string uFq, string uNs, string uMin, string iFq, string iMin,
+                IReadOnlyList<MethodSig> mReqs,
+                IReadOnlyList<PropertySig> pReqs,
+                IReadOnlyList<IndexerSig> iReqs,
+                IReadOnlyList<EventSig> eReqs)
             {
                 UnderlyingFq = uFq; UnderlyingNamespace = uNs; UnderlyingMinimalName = uMin;
-                InterfaceFq = iFq; InterfaceMinimalName = iMin; Requirements = reqs;
+                InterfaceFq = iFq; InterfaceMinimalName = iMin;
+                MethodRequirements = mReqs;
+                PropertyRequirements = pReqs;
+                IndexerRequirements = iReqs;
+                EventRequirements = eReqs;
             }
         }
 
@@ -340,9 +472,7 @@ namespace NTypeForge.SourceGenerator
 
             foreach (var candidate in candidates)
             {
-                // Properties/events/generic methods can't be proxied; generating anyway would
-                // produce a proxy that fails to compile. Skip it (the original call error stands),
-                // and for an explicit Duck<T> call surface a clear diagnostic.
+                // Skip unsupported
                 if (candidate.UnsupportedMemberName != null)
                 {
                     if (candidate.IsDuckCall)
@@ -366,7 +496,10 @@ namespace NTypeForge.SourceGenerator
                         {
                             Fq = candidate.InterfaceFq,
                             MinimalName = candidate.InterfaceMinimalName,
-                            Requirements = candidate.InterfaceRequirements,
+                            MethodRequirements = candidate.MethodRequirements,
+                            PropertyRequirements = candidate.PropertyRequirements,
+                            IndexerRequirements = candidate.IndexerRequirements,
+                            EventRequirements = candidate.EventRequirements
                         };
                     }
 
@@ -394,10 +527,7 @@ namespace NTypeForge.SourceGenerator
 
             if (allExtensions.Count == 0) return;
 
-            // For each interface, the concrete types that structurally match it, most-derived
-            // first: the generated unwrap branches test `TryUnbox<C>` (an `is C` check), which is
-            // also true for subtypes of C, so a derived type must win its own branch ahead of its
-            // base. Ties broken by fully-qualified name for deterministic output.
+            // Matching
             var possibleMatches = new Dictionary<string, List<ConcreteInfo>>(StringComparer.Ordinal);
             foreach (var iface in interfaceInfo.Values.OrderBy(i => i.Fq, StringComparer.Ordinal))
             {
@@ -406,7 +536,12 @@ namespace NTypeForge.SourceGenerator
                              .OrderByDescending(c => c.BaseDepth)
                              .ThenBy(c => c.Fq, StringComparer.Ordinal))
                 {
-                    if (iface.Requirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)))
+                    bool match = iface.MethodRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
+                                 iface.PropertyRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
+                                 iface.IndexerRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
+                                 iface.EventRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey));
+
+                    if (match)
                     {
                         list.Add(concrete);
                     }
@@ -426,7 +561,11 @@ namespace NTypeForge.SourceGenerator
         {
             var proxiesByNamespace = new Dictionary<string, List<ProxyDecl>>(StringComparer.Ordinal);
 
-            void AddProxy(string uFq, string uNs, string uMin, string iFq, string iMin, IReadOnlyList<MethodSig> reqs)
+            void AddProxy(string uFq, string uNs, string uMin, string iFq, string iMin,
+                IReadOnlyList<MethodSig> mReqs,
+                IReadOnlyList<PropertySig> pReqs,
+                IReadOnlyList<IndexerSig> iReqs,
+                IReadOnlyList<EventSig> eReqs)
             {
                 if (!proxiesByNamespace.TryGetValue(uNs, out var list))
                 {
@@ -435,14 +574,15 @@ namespace NTypeForge.SourceGenerator
                 }
                 if (!list.Any(x => x.UnderlyingFq == uFq && x.InterfaceFq == iFq))
                 {
-                    list.Add(new ProxyDecl(uFq, uNs, uMin, iFq, iMin, reqs));
+                    list.Add(new ProxyDecl(uFq, uNs, uMin, iFq, iMin, mReqs, pReqs, iReqs, eReqs));
                 }
             }
 
             foreach (var item in allExtensions)
             {
                 AddProxy(item.UnderlyingFq, item.UnderlyingNamespace, item.UnderlyingMinimalName,
-                    item.InterfaceFq, item.InterfaceMinimalName, item.InterfaceRequirements);
+                    item.InterfaceFq, item.InterfaceMinimalName,
+                    item.MethodRequirements, item.PropertyRequirements, item.IndexerRequirements, item.EventRequirements);
             }
             foreach (var kvp in possibleMatches)
             {
@@ -450,7 +590,8 @@ namespace NTypeForge.SourceGenerator
                 foreach (var concrete in kvp.Value)
                 {
                     AddProxy(concrete.Fq, concrete.Namespace, concrete.MinimalName,
-                        iface.Fq, iface.MinimalName, iface.Requirements);
+                        iface.Fq, iface.MinimalName,
+                        iface.MethodRequirements, iface.PropertyRequirements, iface.IndexerRequirements, iface.EventRequirements);
                 }
             }
 
@@ -665,16 +806,52 @@ namespace NTypeForge.SourceGenerator
             sb.AppendLine($"        object IProxy.Unwrapped => _instance;");
             sb.AppendLine();
 
-            foreach (var method in proxy.Requirements)
+            foreach (var method in proxy.MethodRequirements)
             {
+                var typeParams = method.Arity > 0 ? $"<{string.Join(", ", method.TypeParameters)}>" : "";
                 var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {p.Name}"));
                 var argsStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.Name}"));
 
-                sb.AppendLine($"        public {method.ReturnTypeFq} {method.Name}({parametersStr})");
+                sb.AppendLine($"        public {method.ReturnTypeFq} {method.Name}{typeParams}({parametersStr})");
+                foreach (var constraint in method.Constraints)
+                {
+                    if (!string.IsNullOrEmpty(constraint))
+                        sb.AppendLine($"            {constraint}");
+                }
                 sb.AppendLine("        {");
-                sb.AppendLine($"            {ReturnStatement(method.ReturnsVoid, $"_instance.{method.Name}({argsStr})")}");
+                sb.AppendLine($"            {ReturnStatement(method.ReturnsVoid, $"_instance.{method.Name}{typeParams}({argsStr})")}");
                 sb.AppendLine("        }");
             }
+
+            foreach (var prop in proxy.PropertyRequirements)
+            {
+                sb.AppendLine($"        public {prop.TypeFq} {prop.Name}");
+                sb.AppendLine("        {");
+                if (prop.HasGet) sb.AppendLine($"            get => _instance.{prop.Name};");
+                if (prop.HasSet) sb.AppendLine($"            set => _instance.{prop.Name} = value;");
+                sb.AppendLine("        }");
+            }
+
+            foreach (var idx in proxy.IndexerRequirements)
+            {
+                var parametersStr = string.Join(", ", idx.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {p.Name}"));
+                var argsStr = string.Join(", ", idx.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.Name}"));
+                sb.AppendLine($"        public {idx.TypeFq} this[{parametersStr}]");
+                sb.AppendLine("        {");
+                if (idx.HasGet) sb.AppendLine($"            get => _instance[{argsStr}];");
+                if (idx.HasSet) sb.AppendLine($"            set => _instance[{argsStr}] = value;");
+                sb.AppendLine("        }");
+            }
+
+            foreach (var evt in proxy.EventRequirements)
+            {
+                sb.AppendLine($"        public event {evt.TypeFq} {evt.Name}");
+                sb.AppendLine("        {");
+                sb.AppendLine($"            add => _instance.{evt.Name} += value;");
+                sb.AppendLine($"            remove => _instance.{evt.Name} -= value;");
+                sb.AppendLine("        }");
+            }
+
             sb.AppendLine("    }");
             sb.AppendLine();
         }
