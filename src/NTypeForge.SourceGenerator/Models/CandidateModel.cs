@@ -48,7 +48,7 @@ namespace NTypeForge.SourceGenerator.Models
 
         // Methods the proxy must implement (interface + inherited, deduped). Also used as the
         // structural requirement when matching this interface against other concrete types.
-        public IReadOnlyList<MethodSig> InterfaceRequirements { get; }
+        public IReadOnlyList<MemberSig> InterfaceRequirements { get; }
         // CompatKeys of the underlying type's directly-declared methods, for matching it against
         // other interfaces' requirements.
         public IReadOnlyList<string> UnderlyingSurfaceCompatKeys { get; }
@@ -74,7 +74,7 @@ namespace NTypeForge.SourceGenerator.Models
             string interfaceFq, string interfaceMinimalName,
             int argumentIndex, bool isStatic, bool isDuckCall,
             string originalMethodName, string originalReturnTypeFq, bool originalReturnsVoid, IReadOnlyList<ParamSig> originalParameters,
-            IReadOnlyList<MethodSig> interfaceRequirements, IReadOnlyList<string> underlyingSurfaceCompatKeys,
+            IReadOnlyList<MemberSig> interfaceRequirements, IReadOnlyList<string> underlyingSurfaceCompatKeys,
             bool isSelfMatch, string? unsupportedMemberName,
             string? diagFilePath, TextSpan diagSpan, LinePositionSpan diagLineSpan)
         {

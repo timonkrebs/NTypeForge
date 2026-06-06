@@ -27,8 +27,9 @@ public class DiagnosticTests
     }
 
     [Fact]
-    public void NTF002_ReportedWhenInterfaceHasProperty()
+    public void NTF002_NotReportedWhenInterfaceHasProperty()
     {
+        // Properties are now supported, so NTF002 should not be reported.
         const string source = """
             using NTypeForge;
             namespace T
@@ -44,15 +45,14 @@ public class DiagnosticTests
 
         var diagnostics = GeneratorTestHarness.GetGeneratorDiagnostics(source);
 
-        Assert.True(diagnostics.HasDiagnostic("NTF002"));
+        Assert.False(diagnostics.HasDiagnostic("NTF002"));
         Assert.False(diagnostics.HasDiagnostic("NTF001"));
     }
 
     [Fact]
-    public void NTF002_ReportedWhenInheritedInterfaceHasProperty()
+    public void NTF002_NotReportedWhenInheritedInterfaceHasProperty()
     {
-        // Guards the inherited-member fix: the unsupported property lives on the
-        // *base* interface, so a scan of direct members only would miss it.
+        // Properties are now supported, so NTF002 should not be reported.
         const string source = """
             using NTypeForge;
             namespace T
@@ -69,7 +69,7 @@ public class DiagnosticTests
 
         var diagnostics = GeneratorTestHarness.GetGeneratorDiagnostics(source);
 
-        Assert.True(diagnostics.HasDiagnostic("NTF002"));
+        Assert.False(diagnostics.HasDiagnostic("NTF002"));
     }
 
     [Fact]

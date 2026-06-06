@@ -231,28 +231,74 @@ namespace NTypeForge.SourceGenerator
             => new ParamSig(Fq(p.Type), p.RefKind, p.Name);
 
         private static MethodSig ToMethodSig(IMethodSymbol m)
-            => new MethodSig(
+        {
+            var typeParameters = m.TypeParameters.Select(t => t.Name).ToList();
+
+            var constraintsString = string.Empty;
+            if (m.TypeParameters.Any())
+            {
+                var parts = new List<string>();
+                foreach (var tp in m.TypeParameters)
+                {
+                    var constraints = new List<string>();
+                    if (tp.HasReferenceTypeConstraint) constraints.Add("class");
+                    if (tp.HasValueTypeConstraint) constraints.Add("struct");
+                    if (tp.HasNotNullConstraint) constraints.Add("notnull");
+                    if (tp.HasUnmanagedTypeConstraint) constraints.Add("unmanaged");
+
+                    foreach (var constraintType in tp.ConstraintTypes)
+                    {
+                        constraints.Add(Fq(constraintType));
+                    }
+                    if (tp.HasConstructorConstraint) constraints.Add("new()");
+
+                    if (constraints.Count > 0)
+                    {
+                        parts.Add($"where {tp.Name} : {string.Join(", ", constraints)}");
+                    }
+                }
+                if (parts.Count > 0)
+                {
+                    constraintsString = " " + string.Join(" ", parts);
+                }
+            }
+
+            return new MethodSig(
                 m.Name,
                 Fq(m.ReturnType),
                 m.ReturnType.SpecialType == SpecialType.System_Void,
-                m.Parameters.Select(ToParamSig).ToList());
+                m.Parameters.Select(ToParamSig).ToList(),
+                typeParameters,
+                constraintsString);
+        }
 
         // Methods the proxy must implement: the interface's own methods plus everything inherited
         // from base interfaces (or the generated struct fails CS0535). The direct interface is
         // scanned first so a re-declared (shadowing) member wins over an inherited one of the same
         // signature; methods that differ only by return type collapse via DedupKey.
-        private static IReadOnlyList<MethodSig> BuildInterfaceRequirements(ITypeSymbol interfaceType)
+        private static IReadOnlyList<MemberSig> BuildInterfaceRequirements(ITypeSymbol interfaceType)
         {
-            var result = new List<MethodSig>();
+            var result = new List<MemberSig>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
 
-            foreach (var method in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
-                         .SelectMany(i => i.GetMembers())
-                         .OfType<IMethodSymbol>()
-                         .Where(m => m.MethodKind == MethodKind.Ordinary && !m.IsGenericMethod))
+            foreach (var member in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
+                         .SelectMany(i => i.GetMembers()))
             {
-                var sig = ToMethodSig(method);
-                if (seen.Add(sig.DedupKey))
+                MemberSig? sig = null;
+                if (member is IMethodSymbol method && method.MethodKind == MethodKind.Ordinary)
+                {
+                    sig = ToMethodSig(method);
+                }
+                else if (member is IPropertySymbol property)
+                {
+                    sig = ToPropertySig(property);
+                }
+                else if (member is IEventSymbol evt)
+                {
+                    sig = ToEventSig(evt);
+                }
+
+                if (sig != null && seen.Add(sig.DedupKey))
                 {
                     result.Add(sig);
                 }
@@ -261,38 +307,48 @@ namespace NTypeForge.SourceGenerator
             return result;
         }
 
-        // CompatKeys of the type's directly-declared ordinary methods. Matches the historical
+        // CompatKeys of the type's directly-declared ordinary members. Matches the historical
         // behavior of structural matching against `GetMembers` (inherited members on the concrete
         // type are intentionally not considered).
         private static IReadOnlyList<string> BuildSurfaceCompatKeys(ITypeSymbol type)
-            => type.GetMembers()
-                .OfType<IMethodSymbol>()
-                .Where(m => m.MethodKind == MethodKind.Ordinary && !m.IsGenericMethod)
-                .Select(m => ToMethodSig(m).CompatKey)
-                .Distinct(StringComparer.Ordinal)
-                .ToList();
-
-        // Returns the first interface member NTypeForge cannot proxy (property, event, or generic
-        // method), scanning the full transitive interface set. Accessor methods are reported via
-        // their owning property/event.
-        private static string? FindUnsupportedInterfaceMemberName(ITypeSymbol interfaceType)
         {
-            foreach (var iface in new[] { interfaceType }.Concat(interfaceType.AllInterfaces))
+            var keys = new List<string>();
+            foreach (var member in type.GetMembers())
             {
-                foreach (var member in iface.GetMembers())
+                if (member is IMethodSymbol method && method.MethodKind == MethodKind.Ordinary)
                 {
-                    if (member is IPropertySymbol || member is IEventSymbol)
-                    {
-                        return member.Name;
-                    }
-                    if (member is IMethodSymbol { MethodKind: MethodKind.Ordinary, IsGenericMethod: true } generic)
-                    {
-                        return generic.Name;
-                    }
+                    keys.Add(ToMethodSig(method).CompatKey);
+                }
+                else if (member is IPropertySymbol property)
+                {
+                    keys.Add(ToPropertySig(property).CompatKey);
+                }
+                else if (member is IEventSymbol evt)
+                {
+                    keys.Add(ToEventSig(evt).CompatKey);
                 }
             }
+            return keys.Distinct(StringComparer.Ordinal).ToList();
+        }
+
+        // Returns the first interface member NTypeForge cannot proxy.
+        // With generic methods, properties, and events supported, this is mostly checking for unsupported complex scenarios, but returning null for now as most are supported.
+        private static string? FindUnsupportedInterfaceMemberName(ITypeSymbol interfaceType)
+        {
             return null;
         }
+
+        private static PropertySig ToPropertySig(IPropertySymbol p)
+            => new PropertySig(
+                p.Name,
+                Fq(p.Type),
+                p.GetMethod != null,
+                p.SetMethod != null,
+                p.IsIndexer,
+                p.Parameters.Select(ToParamSig).ToList());
+
+        private static EventSig ToEventSig(IEventSymbol e)
+            => new EventSig(e.Name, Fq(e.Type));
 
         // ---------------------------------------------------------------------------------------
         // Source-output stage (symbol-free): render from the equatable models
@@ -302,7 +358,7 @@ namespace NTypeForge.SourceGenerator
         {
             public string Fq = "";
             public string MinimalName = "";
-            public IReadOnlyList<MethodSig> Requirements = Array.Empty<MethodSig>();
+            public IReadOnlyList<MemberSig> Requirements = Array.Empty<MemberSig>();
         }
 
         private sealed class ConcreteInfo
@@ -321,9 +377,9 @@ namespace NTypeForge.SourceGenerator
             public readonly string UnderlyingMinimalName;
             public readonly string InterfaceFq;
             public readonly string InterfaceMinimalName;
-            public readonly IReadOnlyList<MethodSig> Requirements;
+            public readonly IReadOnlyList<MemberSig> Requirements;
 
-            public ProxyDecl(string uFq, string uNs, string uMin, string iFq, string iMin, IReadOnlyList<MethodSig> reqs)
+            public ProxyDecl(string uFq, string uNs, string uMin, string iFq, string iMin, IReadOnlyList<MemberSig> reqs)
             {
                 UnderlyingFq = uFq; UnderlyingNamespace = uNs; UnderlyingMinimalName = uMin;
                 InterfaceFq = iFq; InterfaceMinimalName = iMin; Requirements = reqs;
@@ -426,7 +482,7 @@ namespace NTypeForge.SourceGenerator
         {
             var proxiesByNamespace = new Dictionary<string, List<ProxyDecl>>(StringComparer.Ordinal);
 
-            void AddProxy(string uFq, string uNs, string uMin, string iFq, string iMin, IReadOnlyList<MethodSig> reqs)
+            void AddProxy(string uFq, string uNs, string uMin, string iFq, string iMin, IReadOnlyList<MemberSig> reqs)
             {
                 if (!proxiesByNamespace.TryGetValue(uNs, out var list))
                 {
@@ -665,15 +721,61 @@ namespace NTypeForge.SourceGenerator
             sb.AppendLine($"        object IProxy.Unwrapped => _instance;");
             sb.AppendLine();
 
-            foreach (var method in proxy.Requirements)
+            foreach (var member in proxy.Requirements)
             {
-                var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {p.Name}"));
-                var argsStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.Name}"));
+                if (member is MethodSig method)
+                {
+                    var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {p.Name}"));
+                    var argsStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.Name}"));
+                    var typeParamsStr = method.TypeParameters.Count > 0 ? $"<{string.Join(", ", method.TypeParameters)}>" : "";
 
-                sb.AppendLine($"        public {method.ReturnTypeFq} {method.Name}({parametersStr})");
-                sb.AppendLine("        {");
-                sb.AppendLine($"            {ReturnStatement(method.ReturnsVoid, $"_instance.{method.Name}({argsStr})")}");
-                sb.AppendLine("        }");
+                    sb.AppendLine($"        public {method.ReturnTypeFq} {method.Name}{typeParamsStr}({parametersStr}){method.ConstraintsString}");
+                    sb.AppendLine("        {");
+                    sb.AppendLine($"            {ReturnStatement(method.ReturnsVoid, $"_instance.{method.Name}{typeParamsStr}({argsStr})")}");
+                    sb.AppendLine("        }");
+                }
+                else if (member is PropertySig property)
+                {
+                    if (property.IsIndexer)
+                    {
+                        var parametersStr = string.Join(", ", property.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {p.Name}"));
+                        var argsStr = string.Join(", ", property.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.Name}"));
+
+                        sb.AppendLine($"        public {property.TypeFq} this[{parametersStr}]");
+                        sb.AppendLine("        {");
+                        if (property.HasGet)
+                        {
+                            sb.AppendLine($"            get => _instance[{argsStr}];");
+                        }
+                        if (property.HasSet)
+                        {
+                            sb.AppendLine($"            set => _instance[{argsStr}] = value;");
+                        }
+                        sb.AppendLine("        }");
+                    }
+                    else
+                    {
+                        sb.AppendLine($"        public {property.TypeFq} {property.Name}");
+                        sb.AppendLine("        {");
+                        if (property.HasGet)
+                        {
+                            sb.AppendLine($"            get => _instance.{property.Name};");
+                        }
+                        if (property.HasSet)
+                        {
+                            sb.AppendLine($"            set => _instance.{property.Name} = value;");
+                        }
+                        sb.AppendLine("        }");
+                    }
+                }
+                else if (member is EventSig evt)
+                {
+                    sb.AppendLine($"        public event {evt.TypeFq} {evt.Name}");
+                    sb.AppendLine("        {");
+                    sb.AppendLine($"            add => _instance.{evt.Name} += value;");
+                    sb.AppendLine($"            remove => _instance.{evt.Name} -= value;");
+                    sb.AppendLine("        }");
+                }
             }
             sb.AppendLine("    }");
             sb.AppendLine();
