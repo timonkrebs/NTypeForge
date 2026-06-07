@@ -119,6 +119,8 @@ namespace NTypeForge.SourceGenerator
             var targetInterface = resolved.TypeArguments[0];
             var underlyingType = GetUnderlyingType(argType);
             if (targetInterface.TypeKind != TypeKind.Interface || !IsProxyableKind(underlyingType)) return null;
+            if (ContainsTypeParameter(argType) || ContainsTypeParameter(underlyingType) || ContainsTypeParameter(targetInterface))
+                return null;
             if (!IsUsableFromGeneratedTopLevelCode(argType) ||
                 !IsUsableFromGeneratedTopLevelCode(underlyingType) ||
                 !IsUsableFromGeneratedTopLevelCode(targetInterface))
@@ -168,6 +170,8 @@ namespace NTypeForge.SourceGenerator
         private static CandidateModel? TryGetMethodArgumentDuck(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
         {
+            if (invocation.Expression is not MemberAccessExpressionSyntax) return null;
+
             var sites = DistinctInterpretations(CollectDuckableArgumentSites(invocation, semanticModel, symbolInfo));
             if (sites.Count != 1) return null;
 
@@ -176,6 +180,10 @@ namespace NTypeForge.SourceGenerator
             var underlyingType = GetUnderlyingType(argType);
             var target = GetForwardingTarget(invocation, semanticModel, candidate);
             if (target == null ||
+                ContainsTypeParameter(target) ||
+                ContainsTypeParameter(argType) ||
+                ContainsTypeParameter(underlyingType) ||
+                ContainsTypeParameter(candidate.Parameters[paramIndex].Type) ||
                 !IsUsableFromGeneratedTopLevelCode(candidate.ContainingType!) ||
                 !IsUsableFromGeneratedTopLevelCode(target) ||
                 !IsUsableFromGeneratedTopLevelCode(argType) ||
@@ -276,11 +284,13 @@ namespace NTypeForge.SourceGenerator
             SemanticModel semanticModel, IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments,
             int syntaxIndex, int paramIndex)
         {
+            if (paramIndex < 0) return false;
+
             var arg = arguments[syntaxIndex];
             var argType = semanticModel.GetTypeInfo(arg.Expression).Type;
             var paramType = candidate.Parameters[paramIndex].Type;
 
-            if (paramIndex < 0 || argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
+            if (argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
 
             var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
             if (conversion.Exists && conversion.IsImplicit) return false;
@@ -357,6 +367,21 @@ namespace NTypeForge.SourceGenerator
                 if (candidate.Parameters[i].Name == name) return i;
             }
             return -1;
+        }
+
+        private static bool ContainsTypeParameter(ITypeSymbol type)
+        {
+            switch (type)
+            {
+                case ITypeParameterSymbol:
+                    return true;
+                case IArrayTypeSymbol array:
+                    return ContainsTypeParameter(array.ElementType);
+                case INamedTypeSymbol named:
+                    return named.TypeArguments.Any(ContainsTypeParameter);
+                default:
+                    return false;
+            }
         }
 
         private static CandidateModel BuildModel(

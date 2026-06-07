@@ -125,6 +125,74 @@ public class CodegenValidityTests
     }
 
     [Fact]
+    public void MethodArgumentDucking_WithMultipleGenericMethodInstantiations_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public TValue H<TValue>(ICalc c, TValue value) => value;
+                    public void M()
+                    {
+                        var m = new Mgr();
+                        _ = m.H(new Adder(), 1);
+                        _ = m.H(new Adder(), "s");
+                    }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void UnqualifiedImplicitDuckCall_IsNotRewired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ICalc c) => c.Add(1, 2);
+                    public void M() { _ = H(new Adder()); }
+                }
+            }
+            """;
+
+        Assert.DoesNotContain("DuckTypingExtensions", GeneratorTestHarness.GetGeneratedText(source));
+    }
+
+    [Fact]
+    public void OpenGenericReceiverImplicitDuck_IsNotRewired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr<TValue>
+                {
+                    public int H(ICalc c, TValue value) => c.Add(1, 2);
+                }
+                public class C
+                {
+                    public void M<TValue>(Mgr<TValue> m, TValue value) { _ = m.H(new Adder(), value); }
+                }
+            }
+            """;
+
+        Assert.DoesNotContain("DuckTypingExtensions", GeneratorTestHarness.GetGeneratedText(source));
+    }
+
+    [Fact]
     public void OptionalUnsignedEnumDefault_DoesNotCrashGenerator()
     {
         const string source = """
