@@ -61,6 +61,10 @@ namespace NTypeForge.SourceGenerator.Models
         // Non-null when the interface has a member NTypeForge can't proxy (property/event/generic
         // method); names the offending member for the NTF002 diagnostic.
         public string? UnsupportedMemberName { get; }
+        // For an implicit (non-Duck) candidate: true when the failing call had exactly one duckable
+        // (overload, argument) interpretation. Gates the NTF003 near-miss warning so it stays off
+        // ambiguous failed calls. Always true for explicit Duck<T> calls.
+        public bool IsUnambiguousDuckSite { get; }
 
         // Diagnostic location, decomposed so it stays equatable and roots nothing.
         public string? DiagFilePath { get; }
@@ -83,7 +87,7 @@ namespace NTypeForge.SourceGenerator.Models
             IReadOnlyList<IndexerSig> indexerRequirements,
             IReadOnlyList<EventSig> eventRequirements,
             IReadOnlyList<string> underlyingSurfaceCompatKeys,
-            bool isSelfMatch, string? unsupportedMemberName,
+            bool isSelfMatch, string? unsupportedMemberName, bool isUnambiguousDuckSite,
             string? diagFilePath, TextSpan diagSpan, LinePositionSpan diagLineSpan)
         {
             TargetFq = targetFq;
@@ -113,6 +117,7 @@ namespace NTypeForge.SourceGenerator.Models
             UnderlyingSurfaceCompatKeys = underlyingSurfaceCompatKeys;
             IsSelfMatch = isSelfMatch;
             UnsupportedMemberName = unsupportedMemberName;
+            IsUnambiguousDuckSite = isUnambiguousDuckSite;
             DiagFilePath = diagFilePath;
             DiagSpan = diagSpan;
             DiagLineSpan = diagLineSpan;
@@ -132,7 +137,7 @@ namespace NTypeForge.SourceGenerator.Models
                 UnderlyingFq, UnderlyingIsInterface, UnderlyingBaseDepth,
                 InterfaceFq, ArgumentIndex, IsStatic, IsDuckCall,
                 OriginalMethodName, OriginalReturnTypeFq, OriginalReturnsVoid, prms,
-                reqs, props, idxs, evts, surface, IsSelfMatch, UnsupportedMemberName ?? "",
+                reqs, props, idxs, evts, surface, IsSelfMatch, UnsupportedMemberName ?? "", IsUnambiguousDuckSite,
                 DiagFilePath ?? "", DiagSpan.Start, DiagSpan.Length);
         }
 

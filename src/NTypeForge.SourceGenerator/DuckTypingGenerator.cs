@@ -29,6 +29,18 @@ namespace NTypeForge.SourceGenerator
             defaultSeverity: DiagnosticSeverity.Error,
             isEnabledByDefault: true);
 
+        // Implicit (no Duck<T>) near-miss. Unlike NTF002, the user did not explicitly ask to duck
+        // here, so this is only a Warning - it must not mask the user's real call-resolution error,
+        // and it fires only at a high-confidence site (see ProcessCandidate). A distinct id (not a
+        // second severity of NTF002) keeps it independently suppressible via .editorconfig.
+        private static readonly DiagnosticDescriptor UnbridgeableImplicitDuck = new DiagnosticDescriptor(
+            id: "NTF003",
+            title: "Type structurally matches but cannot be implicitly duck-typed",
+            messageFormat: "Type '{0}' structurally matches '{1}' but cannot be implicitly duck-typed: member '{2}' is not a supported member",
+            category: "NTypeForge",
+            defaultSeverity: DiagnosticSeverity.Warning,
+            isEnabledByDefault: true);
+
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
             // The transform resolves every duck-typing site into a value-equatable CandidateModel
@@ -120,7 +132,8 @@ namespace NTypeForge.SourceGenerator
 
             return BuildModel(
                 invocation, target: argType, argType: argType, underlyingType: underlyingType,
-                interfaceType: targetInterface, argumentIndex: 0, isStatic: false, isDuckCall: true, originalMethod: null);
+                interfaceType: targetInterface, argumentIndex: 0, isStatic: false, isDuckCall: true,
+                originalMethod: null, isUnambiguousDuckSite: true);
         }
 
         private static ExpressionSyntax? GetDuckInstanceExpression(InvocationExpressionSyntax invocation)
@@ -131,45 +144,62 @@ namespace NTypeForge.SourceGenerator
         }
 
         // A failed call whose argument could implicitly become an interface parameter via a proxy.
+        // All duckable (overload, argument) sites are collected so we can tell whether the call has
+        // exactly one such interpretation: that "unambiguous" flag gates the NTF003 near-miss
+        // warning, keeping it off failed calls that merely happen to have an interface overload.
         private static CandidateModel? TryGetMethodArgumentDuck(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
         {
+            var sites = CollectDuckableArgumentSites(invocation, semanticModel, symbolInfo);
+            if (sites.Count == 0) return null;
+
+            var (candidate, argIndex) = sites[0];
+            var argType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[argIndex].Expression).Type!;
+            return BuildModel(
+                invocation, target: candidate.ContainingType!, argType: argType,
+                underlyingType: GetUnderlyingType(argType), interfaceType: candidate.Parameters[argIndex].Type,
+                argumentIndex: argIndex, isStatic: candidate.IsStatic, isDuckCall: false,
+                originalMethod: candidate, isUnambiguousDuckSite: sites.Count == 1);
+        }
+
+        private static List<(IMethodSymbol Candidate, int ArgIndex)> CollectDuckableArgumentSites(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
+        {
+            var sites = new List<(IMethodSymbol, int)>();
             foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
             {
                 if (candidate.ContainingType == null) continue;
                 var arguments = invocation.ArgumentList.Arguments;
                 if (arguments.Count != candidate.Parameters.Length) continue;
 
-                var model = TryDuckArgument(invocation, semanticModel, candidate, arguments);
-                if (model != null) return model;
+                AddDuckableArgIndices(semanticModel, candidate, arguments, sites);
             }
-            return null;
+            return sites;
         }
 
-        private static CandidateModel? TryDuckArgument(
-            InvocationExpressionSyntax invocation, SemanticModel semanticModel,
-            IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments)
+        private static void AddDuckableArgIndices(
+            SemanticModel semanticModel, IMethodSymbol candidate,
+            SeparatedSyntaxList<ArgumentSyntax> arguments, List<(IMethodSymbol, int)> sites)
         {
             for (int i = 0; i < arguments.Count; i++)
             {
-                var arg = arguments[i];
-                var argType = semanticModel.GetTypeInfo(arg.Expression).Type;
-                var paramType = candidate.Parameters[i].Type;
-
-                if (argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) continue;
-
-                var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
-                if (conversion.Exists && conversion.IsImplicit) continue;
-
-                var underlyingType = GetUnderlyingType(argType);
-                if (!IsProxyableKind(underlyingType)) continue;
-
-                return BuildModel(
-                    invocation, target: candidate.ContainingType, argType: argType, underlyingType: underlyingType,
-                    interfaceType: paramType, argumentIndex: i, isStatic: candidate.IsStatic, isDuckCall: false,
-                    originalMethod: candidate);
+                if (IsDuckableArgument(semanticModel, candidate, arguments, i)) sites.Add((candidate, i));
             }
-            return null;
+        }
+
+        private static bool IsDuckableArgument(
+            SemanticModel semanticModel, IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments, int i)
+        {
+            var arg = arguments[i];
+            var argType = semanticModel.GetTypeInfo(arg.Expression).Type;
+            var paramType = candidate.Parameters[i].Type;
+
+            if (argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
+
+            var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
+            if (conversion.Exists && conversion.IsImplicit) return false;
+
+            return IsProxyableKind(GetUnderlyingType(argType));
         }
 
         private static CandidateModel BuildModel(
@@ -181,7 +211,8 @@ namespace NTypeForge.SourceGenerator
             int argumentIndex,
             bool isStatic,
             bool isDuckCall,
-            IMethodSymbol? originalMethod)
+            IMethodSymbol? originalMethod,
+            bool isUnambiguousDuckSite)
         {
             var methodRequirements = BuildMethodRequirements(interfaceType);
             var propertyRequirements = BuildPropertyRequirements(interfaceType);
@@ -232,6 +263,7 @@ namespace NTypeForge.SourceGenerator
                 underlyingSurfaceCompatKeys: surface,
                 isSelfMatch: isSelfMatch,
                 unsupportedMemberName: unsupported,
+                isUnambiguousDuckSite: isUnambiguousDuckSite,
                 diagFilePath: loc.SourceTree?.FilePath,
                 diagSpan: loc.SourceSpan,
                 diagLineSpan: loc.GetLineSpan().Span);
@@ -283,10 +315,14 @@ namespace NTypeForge.SourceGenerator
             var result = new List<MethodSig>();
             var seen = new HashSet<string>(StringComparer.Ordinal);
 
+            // Static members are excluded: a proxy is an instance struct and cannot implement a
+            // static interface member. A static *abstract* member makes the interface unproxyable
+            // (flagged via FindUnsupportedInterfaceMemberName / NTF002); a static member with a
+            // default implementation is provided by the interface itself, so the concrete need not.
             foreach (var method in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
                          .SelectMany(i => i.GetMembers())
                          .OfType<IMethodSymbol>()
-                         .Where(m => m.MethodKind == MethodKind.Ordinary))
+                         .Where(m => m.MethodKind == MethodKind.Ordinary && !m.IsStatic))
             {
                 var sig = ToMethodSig(method);
                 if (seen.Add(sig.DedupKey))
@@ -306,7 +342,7 @@ namespace NTypeForge.SourceGenerator
             foreach (var prop in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
                          .SelectMany(i => i.GetMembers())
                          .OfType<IPropertySymbol>()
-                         .Where(p => !p.IsIndexer))
+                         .Where(p => !p.IsIndexer && !p.IsStatic))
             {
                 var sig = ToPropertySig(prop);
                 if (seen.Add(sig.Name))
@@ -326,7 +362,7 @@ namespace NTypeForge.SourceGenerator
             foreach (var prop in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
                          .SelectMany(i => i.GetMembers())
                          .OfType<IPropertySymbol>()
-                         .Where(p => p.IsIndexer))
+                         .Where(p => p.IsIndexer && !p.IsStatic))
             {
                 var sig = ToIndexerSig(prop);
                 // Simple DedupKey for indexer by parameters
@@ -347,7 +383,8 @@ namespace NTypeForge.SourceGenerator
 
             foreach (var evt in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
                          .SelectMany(i => i.GetMembers())
-                         .OfType<IEventSymbol>())
+                         .OfType<IEventSymbol>()
+                         .Where(e => !e.IsStatic))
             {
                 var sig = ToEventSig(evt);
                 if (seen.Add(sig.Name))
@@ -530,12 +567,7 @@ namespace NTypeForge.SourceGenerator
         {
             if (candidate.UnsupportedMemberName != null)
             {
-                if (candidate.IsDuckCall)
-                {
-                    context.ReportDiagnostic(Diagnostic.Create(
-                        UnsupportedInterfaceMember, candidate.ToLocation(),
-                        candidate.InterfaceFq, candidate.UnsupportedMemberName));
-                }
+                ReportUnsupported(context, candidate);
                 return;
             }
 
@@ -554,6 +586,31 @@ namespace NTypeForge.SourceGenerator
             RegisterInterface(interfaceInfo, candidate);
             RegisterConcrete(concreteInfo, candidate);
         }
+
+        // An interface member NTypeForge can't proxy was found. An explicit Duck<T> is always a hard
+        // NTF002 error. An implicit method-argument duck only earns a warning, and only at a
+        // high-confidence site: exactly one duckable interpretation (IsUnambiguousDuckSite) whose
+        // argument already satisfies every proxyable member (IsSelfMatch over a non-empty instance
+        // contract). That excludes failed calls that merely happen to have an interface overload.
+        private static void ReportUnsupported(SourceProductionContext context, CandidateModel candidate)
+        {
+            if (candidate.IsDuckCall)
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    UnsupportedInterfaceMember, candidate.ToLocation(),
+                    candidate.InterfaceFq, candidate.UnsupportedMemberName));
+            }
+            else if (candidate.IsUnambiguousDuckSite && candidate.IsSelfMatch && HasInstanceRequirements(candidate))
+            {
+                context.ReportDiagnostic(Diagnostic.Create(
+                    UnbridgeableImplicitDuck, candidate.ToLocation(),
+                    candidate.UnderlyingFq, candidate.InterfaceFq, candidate.UnsupportedMemberName));
+            }
+        }
+
+        private static bool HasInstanceRequirements(CandidateModel candidate)
+            => candidate.MethodRequirements.Count > 0 || candidate.PropertyRequirements.Count > 0 ||
+               candidate.IndexerRequirements.Count > 0 || candidate.EventRequirements.Count > 0;
 
         private static void RegisterInterface(Dictionary<string, InterfaceInfo> interfaceInfo, CandidateModel candidate)
         {

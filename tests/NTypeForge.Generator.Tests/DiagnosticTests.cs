@@ -1,3 +1,5 @@
+using System.Linq;
+using Microsoft.CodeAnalysis;
 using Xunit;
 
 namespace NTypeForge.Generator.Tests;
@@ -253,6 +255,102 @@ public class DiagnosticTests
             """;
 
         Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // High-confidence implicit near-miss: the concrete satisfies every proxyable member of the
+    // parameter interface and the only blocker is an unsupported (static-abstract) member. The
+    // generator surfaces NTF003 - as a Warning, so it explains the failure without becoming a
+    // second hard error on top of the user's real call-resolution error.
+    [Fact]
+    public void NTF003_Warning_WhenImplicitDuckBlockedOnlyByUnsupportedMember()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IFactory { static abstract IFactory Create(); int Do(); }
+                public class Impl { public int Do() => 1; }
+                public class Mgr
+                {
+                    public void H(IFactory f) {}
+                    public void M() { var m = new Mgr(); m.H(new Impl()); }
+                }
+            }
+            """;
+
+        var diagnostics = GeneratorTestHarness.GetGeneratorDiagnostics(source);
+        var ntf003 = diagnostics.Single(d => d.Id == "NTF003");
+        Assert.Equal(DiagnosticSeverity.Warning, ntf003.Severity);
+    }
+
+    // The parameter interface has no proxyable instance member, so the concrete only "matches" it
+    // vacuously - the failed call is almost certainly unrelated to duck typing. No NTF003.
+    [Fact]
+    public void NTF003_NotReported_WhenInterfaceHasNoInstanceContract()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IFactory { static abstract IFactory Create(); }
+                public class Mgr
+                {
+                    public void H(IFactory f) {}
+                    public void H(int x) {}
+                    public void M() { var m = new Mgr(); m.H("oops"); }
+                }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF003"));
+    }
+
+    // Two duckable interface overloads make the failed call ambiguous: NTypeForge cannot know which
+    // the user meant, so it stays silent rather than guessing.
+    [Fact]
+    public void NTF003_NotReported_WhenDuckSiteIsAmbiguous()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IA { int Do(); static abstract IA Make(); }
+                public interface IB { int Do(); static abstract IB Make(); }
+                public class Impl { public int Do() => 1; }
+                public class Mgr
+                {
+                    public void H(IA a) {}
+                    public void H(IB b) {}
+                    public void M() { var m = new Mgr(); m.H(new Impl()); }
+                }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF003"));
+    }
+
+    // A static member with a default implementation is provided by the interface itself, so it is
+    // not "unsupported" and a concrete that matches the instance contract ducks cleanly.
+    [Fact]
+    public void StaticMemberWithDefaultImpl_DoesNotBlockDucking()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IWithStatic
+                {
+                    static int Shared() => 7;
+                    int Do();
+                }
+                public class Impl { public int Do() => 1; }
+                public class C { public void M() { var x = new Impl().Duck<IWithStatic>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 }
