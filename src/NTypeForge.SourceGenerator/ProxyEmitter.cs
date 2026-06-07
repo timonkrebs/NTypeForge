@@ -277,7 +277,7 @@ namespace NTypeForge.SourceGenerator
 
         private static void GenerateProxy(StringBuilder sb, ProxyDecl proxy)
         {
-            var structName = GetProxyStructName(proxy.UnderlyingMinimalName, proxy.UnderlyingFq, proxy.InterfaceMinimalName, proxy.InterfaceFq);
+            var proxyTypeName = GetProxyStructName(proxy.UnderlyingMinimalName, proxy.UnderlyingFq, proxy.InterfaceMinimalName, proxy.InterfaceFq);
             var interfaceFullName = proxy.InterfaceFq;
             var underlyingFullName = proxy.UnderlyingFq;
 
@@ -287,13 +287,13 @@ namespace NTypeForge.SourceGenerator
             // against a readonly value-type field (CS1648), and every mutating call would hit a fresh
             // defensive copy, silently losing state. A class with a mutable field allocates the same
             // (one object per call) and keeps the wrapped instance consistent for its whole lifetime.
-            sb.AppendLine($"    internal sealed class {structName} : {interfaceFullName}, IProxy<{underlyingFullName}>");
+            sb.AppendLine($"    internal sealed class {proxyTypeName} : {interfaceFullName}, IProxy<{underlyingFullName}>");
             sb.AppendLine("    {");
             // Not `readonly`: a struct underlying must stay mutable so `__ntf_instance.X = value` and
             // mutating methods compile and take effect (CS1648 otherwise).
             sb.AppendLine($"        private {underlyingFullName} __ntf_instance;");
             sb.AppendLine();
-            sb.AppendLine($"        public {structName}({underlyingFullName} instance)");
+            sb.AppendLine($"        public {proxyTypeName}({underlyingFullName} instance)");
             sb.AppendLine("        {");
             sb.AppendLine("            __ntf_instance = instance;");
             sb.AppendLine("        }");

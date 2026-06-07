@@ -121,7 +121,7 @@ namespace NTypeForge.SourceGenerator
             if (!(invocation.Expression is MemberAccessExpressionSyntax memberAccess)) return null;
 
             var receiver = semanticModel.GetSymbolInfo(memberAccess.Expression).Symbol;
-            if (receiver is ITypeSymbol || receiver is INamespaceSymbol) return null;
+            if (receiver is ITypeSymbol or INamespaceSymbol) return null;
 
             return memberAccess.Expression;
         }
@@ -153,8 +153,11 @@ namespace NTypeForge.SourceGenerator
         private static List<(IMethodSymbol Candidate, int ArgIndex)> DistinctInterpretations(
             List<(IMethodSymbol Candidate, int ArgIndex)> sites)
         {
+            // Nothing to dedup with 0 or 1 sites (the common case); skip the HashSet and key strings.
+            if (sites.Count <= 1) return sites;
+
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            var result = new List<(IMethodSymbol, int)>();
+            var result = new List<(IMethodSymbol Candidate, int ArgIndex)>();
             foreach (var site in sites)
             {
                 if (seen.Add(InterpretationKey(site.Candidate, site.ArgIndex))) result.Add(site);
