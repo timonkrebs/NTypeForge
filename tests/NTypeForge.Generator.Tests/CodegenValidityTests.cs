@@ -287,4 +287,136 @@ public class CodegenValidityTests
         Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
+
+    // A `public get; private set;` property still satisfies a get-only interface: the public getter
+    // is usable even though the setter is not. Positive side of the accessibility fix.
+    [Fact]
+    public void PublicGetterPrivateSetter_SatisfiesGetOnlyInterface_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IReadValue { int Value { get; } }
+                public class Model { public int Value { get; private set; } }
+                public class C { public void M() { var x = new Model().Duck<IReadValue>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A write-only interface property over a read-write underlying: the proxy needs only a setter.
+    [Fact]
+    public void WriteOnlyInterfaceProperty_OverWritableUnderlying_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IWriteValue { int Value { set; } }
+                public class Settings { public int Value { get; set; } }
+                public class C { public void M() { var x = new Settings().Duck<IWriteValue>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A read-only indexer over a read-write indexer underlying: the get/set accessors are matched
+    // independently, so the read-only requirement is satisfied and the proxy emits only a getter.
+    [Fact]
+    public void ReadOnlyIndexer_OverReadWriteUnderlying_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IReadIdx { string this[int i] { get; } }
+                public class Store { public string this[int i] { get => ""; set { } } }
+                public class C { public void M() { var x = new Store().Duck<IReadIdx>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A multi-type-parameter generic method with a constraint exercises the `<TIn, TOut>` rendering
+    // and the `where` clause in the proxy.
+    [Fact]
+    public void MultiTypeParamGenericMethod_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IConv { TOut Convert<TIn, TOut>(TIn x) where TOut : new(); }
+                public class Conv { public TOut Convert<TIn, TOut>(TIn x) where TOut : new() => new TOut(); }
+                public class C { public void M() { var x = new Conv().Duck<IConv>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Every supported member kind on a single interface must be proxied together without collision.
+    [Fact]
+    public void AllMemberKindsCombined_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            using System;
+            namespace T
+            {
+                public interface IEverything
+                {
+                    int Prop { get; set; }
+                    string this[int i] { get; set; }
+                    event Action<int> Fired;
+                    int Do(int a);
+                    TItem Make<TItem>() where TItem : new();
+                }
+                public class Impl
+                {
+                    public int Prop { get; set; }
+                    public string this[int i] { get => ""; set { } }
+                    public event Action<int> Fired;
+                    public int Do(int a) => a;
+                    public TItem Make<TItem>() where TItem : new() => new TItem();
+                    public void Raise(int v) => Fired?.Invoke(v);
+                }
+                public class C { public void M() { var x = new Impl().Duck<IEverything>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Implicit method-argument ducking (no Duck<T>) where the parameter interface carries a
+    // property must generate a forwarding extension whose proxy implements the property.
+    [Fact]
+    public void ImplicitArgumentDuckingWithProperty_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IHasProp { int Value { get; set; } }
+                public class Concrete { public int Value { get; set; } }
+                public class Mgr
+                {
+                    public int Consume(IHasProp p) => p.Value;
+                    public void M() { var m = new Mgr(); m.Consume(new Concrete()); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
 }

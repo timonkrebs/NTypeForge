@@ -372,17 +372,20 @@ namespace NTypeForge.SourceGenerator
 
         // Every requirement key the member can satisfy on a concrete surface (a member may
         // satisfy several - e.g. a get/set property also satisfies a get-only requirement).
+        // Only public members count: the proxy forwards `_instance.Member`, which would not
+        // compile against a private/protected/internal member (CS0122/CS0272), so a non-public
+        // member must never make the type appear to structurally match.
         private static IEnumerable<string> SurfaceKeysForMember(ISymbol member)
         {
             switch (member)
             {
-                case IMethodSymbol { MethodKind: MethodKind.Ordinary } method:
+                case IMethodSymbol { MethodKind: MethodKind.Ordinary, DeclaredAccessibility: Accessibility.Public } method:
                     return new[] { ToMethodSig(method).CompatKey };
                 case IPropertySymbol { IsIndexer: true } indexer:
                     return IndexerSurfaceKeys(indexer);
                 case IPropertySymbol prop:
                     return PropertySurfaceKeys(prop);
-                case IEventSymbol evt:
+                case IEventSymbol { DeclaredAccessibility: Accessibility.Public } evt:
                     return new[] { ToEventSig(evt).CompatKey };
                 default:
                     return Array.Empty<string>();
@@ -392,8 +395,8 @@ namespace NTypeForge.SourceGenerator
         private static IEnumerable<string> IndexerSurfaceKeys(IPropertySymbol indexer)
         {
             var sig = ToIndexerSig(indexer);
-            var canGet = indexer.GetMethod != null;
-            var canSet = indexer.SetMethod != null;
+            var canGet = indexer.GetMethod is { DeclaredAccessibility: Accessibility.Public };
+            var canSet = indexer.SetMethod is { DeclaredAccessibility: Accessibility.Public };
             if (canGet) yield return new IndexerSig(sig.TypeFq, sig.Parameters, true, false).CompatKey;
             if (canSet) yield return new IndexerSig(sig.TypeFq, sig.Parameters, false, true).CompatKey;
             if (canGet && canSet) yield return sig.CompatKey;
@@ -402,13 +405,16 @@ namespace NTypeForge.SourceGenerator
         private static IEnumerable<string> PropertySurfaceKeys(IPropertySymbol prop)
         {
             var sig = ToPropertySig(prop);
-            var canGet = prop.GetMethod != null;
+            // Each accessor is judged independently: `public int V { get; private set; }` exposes a
+            // public getter but no usable setter, so it satisfies a `{ get; }` requirement but not
+            // `{ get; set; }`.
+            var canGet = prop.GetMethod is { DeclaredAccessibility: Accessibility.Public };
             // A regular `set` can forward both `set` and `init` requirements; an init-only setter
             // can forward neither (the proxy wraps an already-constructed instance, so
             // `_instance.X = value` is illegal - CS8852). Advertise the writable capability only for
-            // a non-init setter, so an init-only underlying is treated as effectively get-only and
-            // never matched to a requirement it cannot fulfill.
-            var canSet = prop.SetMethod is { IsInitOnly: false };
+            // a public non-init setter, so an init-only or non-public underlying is treated as
+            // effectively get-only and never matched to a requirement it cannot fulfill.
+            var canSet = prop.SetMethod is { IsInitOnly: false, DeclaredAccessibility: Accessibility.Public };
             if (canGet) yield return new PropertySig(sig.Name, sig.TypeFq, true, false, false).CompatKey;
             if (canSet)
             {

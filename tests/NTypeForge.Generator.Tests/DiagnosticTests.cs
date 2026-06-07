@@ -142,4 +142,117 @@ public class DiagnosticTests
         Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
+
+    // Regression: a concrete with a *private* setter must not be treated as satisfying a `{ get; set; }`
+    // requirement. The proxy would emit `_instance.Value = value` against an inaccessible setter
+    // (CS0272). Expect a clean NTF001 with no emitted compile errors instead.
+    [Fact]
+    public void NTF001_WhenConcreteSetterIsPrivate()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IWritable { int Value { get; set; } }
+                public class PrivateSetter { public int Value { get; private set; } }
+                public class C { public void M() { var x = new PrivateSetter().Duck<IWritable>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Regression: a *private* method must not count toward structural matching - forwarding
+    // `_instance.Do()` to an inaccessible method is CS0122. Expect a clean NTF001 instead.
+    [Fact]
+    public void NTF001_WhenConcreteMethodIsPrivate()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IDo { int Do(); }
+                public class PrivateDo { private int Do() => 1; }
+                public class C { public void M() { var x = new PrivateDo().Duck<IDo>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A property whose name matches but whose type differs is not a structural match.
+    [Fact]
+    public void NTF001_WhenPropertyTypeDiffers()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IIntValue { int Value { get; } }
+                public class HasString { public string Value { get; set; } = ""; }
+                public class C { public void M() { var x = new HasString().Duck<IIntValue>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A non-generic method cannot satisfy a generic-method requirement (arity differs).
+    [Fact]
+    public void NTF001_WhenGenericMethodArityDiffers()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IGen { TItem Get<TItem>(); }
+                public class NonGeneric { public int Get() => 1; }
+                public class C { public void M() { var x = new NonGeneric().Duck<IGen>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // An init-only interface property over an init-only underlying cannot be proxied (the setter
+    // would assign to an already-constructed instance). It must report NTF001, not emit CS8852.
+    [Fact]
+    public void NTF001_WhenInitOnlyDuckedToInitOnly()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IInit { int Value { get; init; } }
+                public class InitOnly { public int Value { get; init; } }
+                public class C { public void M() { var x = new InitOnly().Duck<IInit>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A required event with no counterpart on the concrete is not a match.
+    [Fact]
+    public void NTF001_WhenInterfaceEventMissing()
+    {
+        const string source = """
+            using NTypeForge;
+            using System;
+            namespace T
+            {
+                public interface IPub { event Action Fired; }
+                public class NoEvent { public int Other() => 1; }
+                public class C { public void M() { var x = new NoEvent().Duck<IPub>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
 }
