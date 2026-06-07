@@ -259,6 +259,40 @@ public class CodegenValidityTests
     }
 
     [Fact]
+    public void UnmanagedGenericConstraint_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IRunner { void Run<TItem>() where TItem : unmanaged; }
+                public class Runner { public void Run<TItem>() where TItem : unmanaged { } }
+                public class C { public void M() { var x = new Runner().Duck<IRunner>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void NotNullGenericConstraint_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IRunner { void Run<TItem>() where TItem : notnull; }
+                public class Runner { public void Run<TItem>() where TItem : notnull { } }
+                public class C { public void M() { var x = new Runner().Duck<IRunner>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
     public void RefReadonlyParameter_EmitsCompilableCode()
     {
         const string source = """

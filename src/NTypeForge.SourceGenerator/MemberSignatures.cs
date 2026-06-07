@@ -88,9 +88,9 @@ namespace NTypeForge.SourceGenerator
         private static List<string> ConstraintList(ITypeParameterSymbol tp, Func<ITypeSymbol, string> formatType)
         {
             var constraints = new List<string>();
-            if (tp.HasReferenceTypeConstraint) constraints.Add("class");
-            if (tp.HasValueTypeConstraint) constraints.Add("struct");
             if (tp.HasUnmanagedTypeConstraint) constraints.Add("unmanaged");
+            else if (tp.HasValueTypeConstraint) constraints.Add("struct");
+            if (tp.HasReferenceTypeConstraint) constraints.Add("class");
             if (tp.HasNotNullConstraint) constraints.Add("notnull");
             foreach (var t in tp.ConstraintTypes) constraints.Add(formatType(t));
             if (tp.HasConstructorConstraint) constraints.Add("new()");
