@@ -25,6 +25,11 @@ namespace NTypeForge.SourceGenerator.Models
             Name = name;
             Key = $"{refKind}:{typeFq}:{name}";
         }
+
+        // The canonical parameter-shape encoding (ref kind + type, no names) shared by every key
+        // that identifies a member by its parameter list.
+        public static string Shape(IReadOnlyList<ParamSig> parameters)
+            => string.Join(",", parameters.Select(x => $"{x.RefKind}:{x.TypeFq}"));
     }
 
     // A method reduced to render-ready primitives plus two canonical keys:
@@ -54,9 +59,8 @@ namespace NTypeForge.SourceGenerator.Models
             Arity = arity;
             TypeParameters = typeParameters;
             Constraints = constraints;
-            var p = string.Join(",", parameters.Select(x => $"{x.RefKind}:{x.TypeFq}"));
             var generic = arity > 0 ? $"`{arity}" : "";
-            DedupKey = $"{name}{generic}({p})";
+            DedupKey = $"{name}{generic}({ParamSig.Shape(parameters)})";
             CompatKey = $"{returnTypeFq} {DedupKey}";
         }
     }
@@ -80,10 +84,16 @@ namespace NTypeForge.SourceGenerator.Models
             HasGet = hasGet;
             HasSet = hasSet;
             IsInit = isInit;
-            // The setter slot distinguishes none / `set` / `init` so an init-only requirement never
-            // matches a key advertising a plain setter (and vice versa).
+            CompatKey = CompatKeyFor(name, typeFq, hasGet, hasSet, isInit);
+        }
+
+        // The setter slot distinguishes none / `set` / `init` so an init-only requirement never
+        // matches a key advertising a plain setter (and vice versa). Exposed statically so the
+        // surface scan can enumerate the keys a member satisfies without allocating a PropertySig.
+        public static string CompatKeyFor(string name, string typeFq, bool hasGet, bool hasSet, bool isInit)
+        {
             var setMarker = isInit ? "I" : (hasSet ? "S" : "");
-            CompatKey = $"Property:{typeFq}:{name}:{(hasGet ? "G" : "")}:{setMarker}";
+            return $"Property:{typeFq}:{name}:{(hasGet ? "G" : "")}:{setMarker}";
         }
     }
 
@@ -93,6 +103,9 @@ namespace NTypeForge.SourceGenerator.Models
         public IReadOnlyList<ParamSig> Parameters { get; }
         public bool HasGet { get; }
         public bool HasSet { get; }
+        // Parameter shape only (indexers are identified by their argument list, like a method's
+        // DedupKey). Indexers have no `init` accessor in C#, so the setter is always a plain `set`.
+        public string DedupKey { get; }
         public string CompatKey { get; }
 
         public IndexerSig(string typeFq, IReadOnlyList<ParamSig> parameters, bool hasGet, bool hasSet)
@@ -101,9 +114,14 @@ namespace NTypeForge.SourceGenerator.Models
             Parameters = parameters;
             HasGet = hasGet;
             HasSet = hasSet;
-            var p = string.Join(",", parameters.Select(x => $"{x.RefKind}:{x.TypeFq}"));
-            CompatKey = $"Indexer:{typeFq}:[{p}]:{(hasGet ? "G" : "")}:{(hasSet ? "S" : "")}";
+            DedupKey = $"[{ParamSig.Shape(parameters)}]";
+            CompatKey = CompatKeyFor(typeFq, parameters, hasGet, hasSet);
         }
+
+        // Exposed statically so the surface scan can enumerate the keys a member satisfies without
+        // allocating an IndexerSig.
+        public static string CompatKeyFor(string typeFq, IReadOnlyList<ParamSig> parameters, bool hasGet, bool hasSet)
+            => $"Indexer:{typeFq}:[{ParamSig.Shape(parameters)}]:{(hasGet ? "G" : "")}:{(hasSet ? "S" : "")}";
     }
 
     internal sealed class EventSig

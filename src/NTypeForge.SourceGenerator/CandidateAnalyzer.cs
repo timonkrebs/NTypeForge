@@ -167,20 +167,15 @@ namespace NTypeForge.SourceGenerator
             IMethodSymbol? originalMethod,
             bool isUnambiguousDuckSite)
         {
-            var methodRequirements = BuildMethodRequirements(interfaceType);
-            var propertyRequirements = BuildPropertyRequirements(interfaceType);
-            var indexerRequirements = BuildIndexerRequirements(interfaceType);
-            var eventRequirements = BuildEventRequirements(interfaceType);
+            var requirements = AnalyzeRequirements(interfaceType);
 
             var surface = BuildSurfaceCompatKeys(underlyingType);
             var surfaceSet = new HashSet<string>(surface, StringComparer.Ordinal);
 
-            bool isSelfMatch = methodRequirements.All(r => surfaceSet.Contains(r.CompatKey)) &&
-                               propertyRequirements.All(r => surfaceSet.Contains(r.CompatKey)) &&
-                               indexerRequirements.All(r => surfaceSet.Contains(r.CompatKey)) &&
-                               eventRequirements.All(r => surfaceSet.Contains(r.CompatKey));
-
-            var unsupported = FindUnsupportedInterfaceMemberName(interfaceType);
+            bool isSelfMatch = requirements.Methods.All(r => surfaceSet.Contains(r.CompatKey)) &&
+                               requirements.Properties.All(r => surfaceSet.Contains(r.CompatKey)) &&
+                               requirements.Indexers.All(r => surfaceSet.Contains(r.CompatKey)) &&
+                               requirements.Events.All(r => surfaceSet.Contains(r.CompatKey));
 
             var originalParams = originalMethod == null
                 ? (IReadOnlyList<ParamSig>)Array.Empty<ParamSig>()
@@ -209,13 +204,13 @@ namespace NTypeForge.SourceGenerator
                 originalReturnTypeFq: originalMethod == null ? "" : Fq(originalMethod.ReturnType),
                 originalReturnsVoid: originalMethod != null && originalMethod.ReturnType.SpecialType == SpecialType.System_Void,
                 originalParameters: originalParams,
-                methodRequirements: methodRequirements,
-                propertyRequirements: propertyRequirements,
-                indexerRequirements: indexerRequirements,
-                eventRequirements: eventRequirements,
+                methodRequirements: requirements.Methods,
+                propertyRequirements: requirements.Properties,
+                indexerRequirements: requirements.Indexers,
+                eventRequirements: requirements.Events,
                 underlyingSurfaceCompatKeys: surface,
                 isSelfMatch: isSelfMatch,
-                unsupportedMemberName: unsupported,
+                unsupportedMemberName: requirements.Unsupported,
                 isUnambiguousDuckSite: isUnambiguousDuckSite,
                 diagFilePath: loc.SourceTree?.FilePath,
                 diagSpan: loc.SourceSpan,
@@ -263,90 +258,106 @@ namespace NTypeForge.SourceGenerator
         private static EventSig ToEventSig(IEventSymbol e)
             => new EventSig(e.Name, Fq(e.Type));
 
-        private static IReadOnlyList<MethodSig> BuildMethodRequirements(ITypeSymbol interfaceType)
+        // Walks the interface and all its base interfaces once, bucketing members into the four
+        // proxyable requirement kinds (deduped per kind) and noting the first unsupported member.
+        private static InterfaceRequirements AnalyzeRequirements(ITypeSymbol interfaceType)
         {
-            var result = new List<MethodSig>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-
-            // Static members are excluded: a proxy is an instance struct and cannot implement a
-            // static interface member. A static *abstract* member makes the interface unproxyable
-            // (flagged via FindUnsupportedInterfaceMemberName / NTF002); a static member with a
-            // default implementation is provided by the interface itself, so the concrete need not.
-            foreach (var method in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
-                         .SelectMany(i => i.GetMembers())
-                         .OfType<IMethodSymbol>()
-                         .Where(m => m.MethodKind == MethodKind.Ordinary && !m.IsStatic))
+            var builder = new RequirementsBuilder();
+            foreach (var iface in new[] { interfaceType }.Concat(interfaceType.AllInterfaces))
             {
-                var sig = ToMethodSig(method);
-                if (seen.Add(sig.DedupKey))
+                foreach (var member in iface.GetMembers())
                 {
-                    result.Add(sig);
+                    builder.Observe(member);
                 }
             }
-
-            return result;
+            return builder.Build();
         }
 
-        private static IReadOnlyList<PropertySig> BuildPropertyRequirements(ITypeSymbol interfaceType)
+        // The proxyable members an interface (plus its bases) requires, and the first member that
+        // makes it unproxyable (a static abstract member), if any.
+        private readonly struct InterfaceRequirements
         {
-            var result = new List<PropertySig>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-
-            foreach (var prop in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
-                         .SelectMany(i => i.GetMembers())
-                         .OfType<IPropertySymbol>()
-                         .Where(p => !p.IsIndexer && !p.IsStatic))
+            public InterfaceRequirements(
+                IReadOnlyList<MethodSig> methods, IReadOnlyList<PropertySig> properties,
+                IReadOnlyList<IndexerSig> indexers, IReadOnlyList<EventSig> events, string? unsupported)
             {
-                var sig = ToPropertySig(prop);
-                if (seen.Add(sig.Name))
-                {
-                    result.Add(sig);
-                }
+                Methods = methods;
+                Properties = properties;
+                Indexers = indexers;
+                Events = events;
+                Unsupported = unsupported;
             }
 
-            return result;
+            public IReadOnlyList<MethodSig> Methods { get; }
+            public IReadOnlyList<PropertySig> Properties { get; }
+            public IReadOnlyList<IndexerSig> Indexers { get; }
+            public IReadOnlyList<EventSig> Events { get; }
+            public string? Unsupported { get; }
         }
 
-        private static IReadOnlyList<IndexerSig> BuildIndexerRequirements(ITypeSymbol interfaceType)
+        // Accumulates the requirement buckets in a single traversal of the interface's members.
+        // Static members are never proxied (a proxy is an instance struct): a static *abstract*
+        // member makes the interface unproxyable (-> Unsupported / NTF002), while a static member
+        // with a default implementation is supplied by the interface itself, so the concrete need
+        // not have it.
+        private sealed class RequirementsBuilder
         {
-            var result = new List<IndexerSig>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
+            private readonly List<MethodSig> _methods = new List<MethodSig>();
+            private readonly List<PropertySig> _properties = new List<PropertySig>();
+            private readonly List<IndexerSig> _indexers = new List<IndexerSig>();
+            private readonly List<EventSig> _events = new List<EventSig>();
+            private readonly HashSet<string> _seenMethods = new HashSet<string>(StringComparer.Ordinal);
+            private readonly HashSet<string> _seenProperties = new HashSet<string>(StringComparer.Ordinal);
+            private readonly HashSet<string> _seenIndexers = new HashSet<string>(StringComparer.Ordinal);
+            private readonly HashSet<string> _seenEvents = new HashSet<string>(StringComparer.Ordinal);
+            private string? _unsupported;
 
-            foreach (var prop in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
-                         .SelectMany(i => i.GetMembers())
-                         .OfType<IPropertySymbol>()
-                         .Where(p => p.IsIndexer && !p.IsStatic))
+            public void Observe(ISymbol member)
             {
-                var sig = ToIndexerSig(prop);
-                // Simple DedupKey for indexer by parameters
-                var pKey = string.Join(",", prop.Parameters.Select(x => $"{x.RefKind}:{Fq(x.Type)}"));
-                if (seen.Add(pKey))
+                TrackUnsupported(member);
+                if (!member.IsStatic) Bucket(member);
+            }
+
+            public InterfaceRequirements Build()
+                => new InterfaceRequirements(_methods, _properties, _indexers, _events, _unsupported);
+
+            private void TrackUnsupported(ISymbol member)
+            {
+                if (_unsupported != null) return;
+                if (member.IsStatic && member.IsAbstract &&
+                    (member is IMethodSymbol { MethodKind: MethodKind.Ordinary } || member is IPropertySymbol || member is IEventSymbol))
                 {
-                    result.Add(sig);
+                    _unsupported = member.Name;
                 }
             }
 
-            return result;
-        }
-
-        private static IReadOnlyList<EventSig> BuildEventRequirements(ITypeSymbol interfaceType)
-        {
-            var result = new List<EventSig>();
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-
-            foreach (var evt in new[] { interfaceType }.Concat(interfaceType.AllInterfaces)
-                         .SelectMany(i => i.GetMembers())
-                         .OfType<IEventSymbol>()
-                         .Where(e => !e.IsStatic))
+            private void Bucket(ISymbol member)
             {
-                var sig = ToEventSig(evt);
-                if (seen.Add(sig.Name))
+                switch (member)
                 {
-                    result.Add(sig);
+                    case IMethodSymbol { MethodKind: MethodKind.Ordinary } method:
+                        var m = ToMethodSig(method);
+                        Dedup(_seenMethods, m.DedupKey, _methods, m);
+                        break;
+                    case IPropertySymbol { IsIndexer: true } indexer:
+                        var ix = ToIndexerSig(indexer);
+                        Dedup(_seenIndexers, ix.DedupKey, _indexers, ix);
+                        break;
+                    case IPropertySymbol prop:
+                        var p = ToPropertySig(prop);
+                        Dedup(_seenProperties, p.Name, _properties, p);
+                        break;
+                    case IEventSymbol evt:
+                        var e = ToEventSig(evt);
+                        Dedup(_seenEvents, e.Name, _events, e);
+                        break;
                 }
             }
 
-            return result;
+            private static void Dedup<T>(HashSet<string> seen, string key, List<T> list, T sig)
+            {
+                if (seen.Add(key)) list.Add(sig);
+            }
         }
 
         // CompatKeys of the type's directly-declared members.
@@ -384,17 +395,19 @@ namespace NTypeForge.SourceGenerator
 
         private static IEnumerable<string> IndexerSurfaceKeys(IPropertySymbol indexer)
         {
-            var sig = ToIndexerSig(indexer);
+            var typeFq = Fq(indexer.Type);
+            var parameters = indexer.Parameters.Select(ToParamSig).ToList();
             var canGet = indexer.GetMethod is { DeclaredAccessibility: Accessibility.Public };
             var canSet = indexer.SetMethod is { DeclaredAccessibility: Accessibility.Public };
-            if (canGet) yield return new IndexerSig(sig.TypeFq, sig.Parameters, true, false).CompatKey;
-            if (canSet) yield return new IndexerSig(sig.TypeFq, sig.Parameters, false, true).CompatKey;
-            if (canGet && canSet) yield return sig.CompatKey;
+            if (canGet) yield return IndexerSig.CompatKeyFor(typeFq, parameters, true, false);
+            if (canSet) yield return IndexerSig.CompatKeyFor(typeFq, parameters, false, true);
+            if (canGet && canSet) yield return IndexerSig.CompatKeyFor(typeFq, parameters, true, true);
         }
 
         private static IEnumerable<string> PropertySurfaceKeys(IPropertySymbol prop)
         {
-            var sig = ToPropertySig(prop);
+            var name = prop.Name;
+            var typeFq = Fq(prop.Type);
             // Each accessor is judged independently: `public int V { get; private set; }` exposes a
             // public getter but no usable setter, so it satisfies a `{ get; }` requirement but not
             // `{ get; set; }`.
@@ -405,37 +418,17 @@ namespace NTypeForge.SourceGenerator
             // a public non-init setter, so an init-only or non-public underlying is treated as
             // effectively get-only and never matched to a requirement it cannot fulfill.
             var canSet = prop.SetMethod is { IsInitOnly: false, DeclaredAccessibility: Accessibility.Public };
-            if (canGet) yield return new PropertySig(sig.Name, sig.TypeFq, true, false, false).CompatKey;
+            if (canGet) yield return PropertySig.CompatKeyFor(name, typeFq, true, false, false);
             if (canSet)
             {
-                yield return new PropertySig(sig.Name, sig.TypeFq, false, true, false).CompatKey;
-                yield return new PropertySig(sig.Name, sig.TypeFq, false, true, true).CompatKey;
+                yield return PropertySig.CompatKeyFor(name, typeFq, false, true, false);
+                yield return PropertySig.CompatKeyFor(name, typeFq, false, true, true);
             }
             if (canGet && canSet)
             {
-                yield return new PropertySig(sig.Name, sig.TypeFq, true, true, false).CompatKey;
-                yield return new PropertySig(sig.Name, sig.TypeFq, true, true, true).CompatKey;
+                yield return PropertySig.CompatKeyFor(name, typeFq, true, true, false);
+                yield return PropertySig.CompatKeyFor(name, typeFq, true, true, true);
             }
-        }
-
-        // Returns the first interface member NTypeForge cannot proxy.
-        private static string? FindUnsupportedInterfaceMemberName(ITypeSymbol interfaceType)
-        {
-            foreach (var iface in new[] { interfaceType }.Concat(interfaceType.AllInterfaces))
-            {
-                foreach (var member in iface.GetMembers())
-                {
-                    // Instance ducking cannot proxy static members that require implementation.
-                    // While DIMs are allowed, any required static member must be flagged.
-                    if (member.IsStatic && member.IsAbstract && (member is IMethodSymbol { MethodKind: MethodKind.Ordinary } ||
-                                           member is IPropertySymbol ||
-                                           member is IEventSymbol))
-                    {
-                        return member.Name;
-                    }
-                }
-            }
-            return null;
         }
 
         // ---------------------------------------------------------------------------------------
