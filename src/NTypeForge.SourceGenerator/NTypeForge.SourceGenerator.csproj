@@ -17,6 +17,12 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+    <!--
+      Reference the 4.12 Roslyn API so the generator loads in a broad range of SDKs. NOTE: the
+      generated code uses C# 14 `extension` members, which only *compile* under a Roslyn 5 /
+      C# 14-preview host. The generator runs fine on older hosts but its output won't bind there;
+      that's the experimental constraint called out in the README, not a packaging bug.
+    -->
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.12.0" />
   </ItemGroup>
 

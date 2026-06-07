@@ -277,7 +277,7 @@ namespace NTypeForge.SourceGenerator
 
         private static void GenerateProxy(StringBuilder sb, ProxyDecl proxy)
         {
-            var proxyTypeName = GetProxyStructName(proxy.UnderlyingMinimalName, proxy.UnderlyingFq, proxy.InterfaceMinimalName, proxy.InterfaceFq);
+            var proxyTypeName = GetProxyTypeName(proxy.UnderlyingMinimalName, proxy.UnderlyingFq, proxy.InterfaceMinimalName, proxy.InterfaceFq);
             var interfaceFullName = proxy.InterfaceFq;
             var underlyingFullName = proxy.UnderlyingFq;
 
@@ -377,7 +377,7 @@ namespace NTypeForge.SourceGenerator
         private static string ProxyFullName(
             string underlyingNamespace, string underlyingMinimalName, string underlyingFq,
             string interfaceMinimalName, string interfaceFq)
-            => $"global::{underlyingNamespace}.{GetProxyStructName(underlyingMinimalName, underlyingFq, interfaceMinimalName, interfaceFq)}";
+            => $"global::{underlyingNamespace}.{GetProxyTypeName(underlyingMinimalName, underlyingFq, interfaceMinimalName, interfaceFq)}";
 
         private static string RefPrefix(RefKind refKind)
             => refKind switch { RefKind.Ref => "ref ", RefKind.Out => "out ", RefKind.In => "in ", _ => "" };
@@ -425,7 +425,7 @@ namespace NTypeForge.SourceGenerator
         // interface. The prefix aids debugging; the hash guarantees uniqueness, since distinct types
         // can sanitize to the same identifier (e.g. `Foo<int>` and a type literally named `Foo_int_`,
         // or nested `Outer.Inner` and `Outer_Inner`) and would otherwise collide (CS0101).
-        private static string GetProxyStructName(
+        private static string GetProxyTypeName(
             string underlyingMinimalName, string underlyingFq, string interfaceMinimalName, string interfaceFq)
             => $"{Sanitize(underlyingMinimalName)}_{Sanitize(interfaceMinimalName)}_Proxy_{StableHash(underlyingFq + "|" + interfaceFq)}";
 
