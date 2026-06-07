@@ -134,3 +134,6 @@ _NCrunch*
 
 # Rider
 .idea/
+
+# BenchmarkDotNet output
+BenchmarkDotNet.Artifacts/

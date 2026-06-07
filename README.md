@@ -22,11 +22,13 @@ reflection, no runtime type inspection, no hand-written adapters.
   - [1. Pass a structurally-matching type to a method](#1-pass-a-structurally-matching-type-to-a-method)
   - [2. Create a proxy explicitly with `Duck<T>()`](#2-create-a-proxy-explicitly-with-duckt)
   - [3. Get the original instance back](#3-get-the-original-instance-back)
-- [Advanced types](#advanced-types)
+- [Supported members](#supported-members)
 - [How it works](#how-it-works)
-- [Performance & overhead](#performance--overhead)
+- [Runtime overhead](#runtime-overhead)
+- [Compile-time implications](#compile-time-implications)
 - [Limitations](#limitations)
 - [Diagnostics](#diagnostics)
+- [Development](#development)
 
 ---
 
@@ -180,39 +182,51 @@ once, rather than stacking a proxy on top of a proxy.
 
 ---
 
-## Advanced types
+## Supported members
 
-The generator preserves full signature fidelity, including value types and
-parameter-passing modifiers.
+The generator proxies the full range of interface members, preserving signature
+fidelity including value types and parameter-passing modifiers.
 
-- ✅ `class`, `struct`, and `record` arguments
-- ✅ `ref`, `out`, and `in` parameters
-- ✅ Custom types as parameters and return values
-- ✅ Interfaces that inherit from other interfaces (all inherited methods are proxied)
+| Member kind | Supported |
+| --- | --- |
+| Methods (incl. `ref`/`out`/`in` params, custom types) | ✅ |
+| Properties (get/set, get-only, `init`-only, write-only) | ✅ |
+| Indexers (single- and multi-parameter) | ✅ |
+| Events | ✅ |
+| Generic methods (incl. constraints, multiple type parameters) | ✅ |
+| Interfaces inheriting from other interfaces (all inherited members proxied) | ✅ |
+| `class`, `struct`, and `record` arguments | ✅ |
 
 ```cs
 public struct Point { public int X, Y; }
 
-public interface IGeometry
+public interface IWidget
 {
-    void Move(ref Point point, int dx, int dy);
-    void SetOrigin(out Point point);
+    string Title { get; set; }            // property
+    int this[int index] { get; }          // indexer
+    event Action? Clicked;                // event
+    void Move(ref Point point, int dx);   // ref/out/in preserved
+    T Echo<T>(T value) where T : class;   // generic method
 }
 
-public class MyGeometry // does not implement IGeometry
+public class MyWidget // does not implement IWidget
 {
-    public void Move(ref Point point, int dx, int dy) { /* ... */ }
-    public void SetOrigin(out Point point)            { point = default; }
+    public string Title { get; set; } = "";
+    public int this[int index] => index * 2;
+    public event Action? Clicked;
+    public void Move(ref Point point, int dx) { /* ... */ }
+    public T Echo<T>(T value) where T : class => value;
 }
 
-public class GeometryManager
-{
-    public void Transform(IGeometry geometry) { /* ... */ }
-}
-
-var manager = new GeometryManager();
-manager.Transform(new MyGeometry()); // ✅ ref/out semantics preserved
+IWidget widget = new MyWidget().Duck<IWidget>(); // ✅ every member is forwarded
 ```
+
+**Accessor fidelity.** Each property/indexer accessor is matched independently and
+forwarded with the interface's accessor kind. A `public int V { get; private set; }`
+satisfies a `{ get; }` interface but not `{ get; set; }` (the private setter isn't
+callable). An `init`-only interface property is implemented with `init` — and an
+`init`-only *underlying* member is treated as get-only, since the proxy wraps an
+already-constructed instance and could never assign it.
 
 ---
 
@@ -264,7 +278,7 @@ change any duck-typing site skip regeneration.
 
 ---
 
-## Performance & overhead
+## Runtime overhead
 
 NTypeForge avoids the usual cost of dynamic duck typing — **no reflection, no
 `DynamicObject`, no expression-tree compilation, no per-call dispatch setup.** A
@@ -275,23 +289,71 @@ moment it's passed where the target interface is expected, it gets **boxed once*
 (a single small heap allocation per call). The win is structural: you pay one box,
 not a reflection pipeline — and you keep full compile-time type checking.
 
+## Compile-time implications
+
+NTypeForge does its work *during compilation*, so the cost it adds is a
+**build-time** cost, not a runtime one. There are two parts: (1) running the
+generator, and (2) the compiler then having to bind and emit the code it produced.
+
+The table below compiles one fixed program three ways. The source is **identical**
+across all rows — it uses `Duck<T>()`, which binds to the [runtime
+fallback](src/NTypeForge/DuckExtensions.cs) when the generator is absent and to a
+generated proxy when it is present — so the only variable is whether NTypeForge
+participates. `Sites` is the number of distinct `Duck<T>()` call sites (each adds
+one interface, one class, one generated proxy, and one generated extension).
+
+| Phase | 10 sites | 50 sites | 100 sites |
+| --- | ---: | ---: | ---: |
+| Compile only — **NTypeForge OFF** (baseline) | 16 ms | 78 ms | 106 ms |
+| Generator pass only (no emit) | 7 ms | 183 ms | 577 ms |
+| Full compile — **NTypeForge ON** | 461 ms | 2,341 ms | 4,875 ms |
+
+<sub>BenchmarkDotNet 0.14.0, .NET 10.0.4, Roslyn 5.0.0, in a 2-core (1 physical) Linux container — a deliberately
+constrained box, so treat the **absolute** numbers as worst-case and the **shape** as the takeaway.
+`ShortRun` (3 iterations); small-`Sites` rows are noisy. Reproduce with
+`dotnet run -c Release --project bench/NTypeForge.Benchmarks`.</sub>
+
+**What this shows:**
+
+- **Running the generator is cheap** (~6 ms per site). It resolves each call site
+  into a small value-equatable model and emits text; that is the small middle row.
+- **Compiling the generated code dominates.** Most of the "ON" time is the compiler
+  binding and emitting the generated proxies and — chiefly — the C# 14 `extension`
+  blocks, which are a preview feature that isn't optimized yet. On this hardware
+  that is roughly **40 ms of added compile time per duck-typing site**, scaling
+  about **linearly** with the number of sites.
+- So a handful of duck sites is negligible; **heavy, pervasive use** (hundreds of
+  sites) adds noticeable seconds to a *clean* build. As the `extension`-member
+  feature matures toward release, this cost should fall.
+
+**Incrementality.** The generator pipeline is fully cacheable: each call site is
+reduced to a value-equatable model holding no symbols, so on an edit that doesn't
+change any duck-typing site the generator's transform is reused and the IDE stays
+responsive. Caching reuses the generator *output*; it does not remove the compiler's
+cost of binding that output on a rebuild.
+
 ---
 
 ## Limitations
 
-NTypeForge proxies **non-generic methods only**. The following interface members are
-**not** supported and will prevent a proxy from being generated:
+- **Public members only.** Structural matching counts a type's **public** members.
+  A `private`/`protected`/`internal` member (or accessor) can't be forwarded by the
+  proxy, so it never counts toward a match.
+- **Directly-declared members.** Matching considers a type's own declared members;
+  members it inherits from a base *class* are not counted toward the match.
+- **`static abstract` interface members are unsupported.** A proxy is an instance
+  struct and can't implement a static member that has no default implementation.
+  Such an interface can't be proxied (a `static` member *with* a default
+  implementation is fine — it's supplied by the interface itself).
+- **`init`-only underlying members are effectively read-only.** A proxy wraps an
+  already-constructed instance, so it can satisfy a settable interface requirement
+  only when the underlying setter is a regular `set`.
 
-- ❌ Properties and indexers
-- ❌ Events
-- ❌ Generic methods
-
-An explicit `Duck<T>()` against such an interface reports
-[NTF002](#diagnostics); an implicit call is simply left as the original (still
-failing) call so the compiler's own error stands.
-
-Structural matching considers a type's **directly declared** methods — members it
-inherits from a base *class* are not counted toward the match.
+When `Duck<T>()` targets an interface with an unsupported member it reports
+[NTF002](#diagnostics). An implicit (non-`Duck`) call is left as the original
+(still-failing) call so the compiler's own error stands — except at a
+high-confidence near-miss, where it emits the [NTF003](#diagnostics) warning to
+explain why duck typing didn't kick in.
 
 ---
 
@@ -300,7 +362,43 @@ inherits from a base *class* are not counted toward the match.
 | ID | Severity | Meaning |
 | --- | --- | --- |
 | **NTF001** | Error | `Duck<T>()` was used but the type does not structurally implement every member required by `T`. |
-| **NTF002** | Error | The target interface contains a member NTypeForge cannot proxy (a property, event, or generic method). |
+| **NTF002** | Error | A `Duck<T>()` target interface contains a member NTypeForge cannot proxy (e.g. a `static abstract` member). |
+| **NTF003** | Warning | An implicit call's argument structurally matches the parameter interface *except* for an unsupported member, so NTypeForge couldn't bridge it — surfaced to explain why the call still fails, without masking the compiler's own error. |
+
+---
+
+## Development
+
+Build and test with the standard SDK commands against `NTypeForge.slnx`:
+
+```bash
+dotnet build
+dotnet test
+```
+
+### Cognitive Complexity gate
+
+The repo ships an **opt-in** [SonarSource Cognitive Complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf)
+check (rule `S3776`, per-method threshold **15**). Normal builds are unaffected; to
+measure it locally:
+
+```bash
+dotnet build -p:MeasureCognitiveComplexity=true
+```
+
+This enables `SonarAnalyzer.CSharp` with only `S3776` (see
+[`Directory.Build.props`](Directory.Build.props) and [`SonarLint.xml`](SonarLint.xml)).
+CI runs it as a separate `cognitive-complexity` job that escalates the warning to an
+error, so any method above 15 fails the build.
+
+### Benchmarks
+
+[`bench/NTypeForge.Benchmarks`](bench/NTypeForge.Benchmarks) measures the compile-time
+cost reported above:
+
+```bash
+dotnet run -c Release --project bench/NTypeForge.Benchmarks
+```
 
 ---
 
