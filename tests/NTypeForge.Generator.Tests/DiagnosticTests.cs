@@ -119,4 +119,27 @@ public class DiagnosticTests
         Assert.False(diagnostics.HasDiagnostic("NTF001"));
         Assert.False(diagnostics.HasDiagnostic("NTF002"));
     }
+
+    // An init-only *underlying* setter cannot be forwarded: the proxy wraps an already-constructed
+    // instance, so `_instance.Value = value` would be CS8852. The generator must report a clean
+    // NTF001 (no structural match) instead of emitting code that fails to compile.
+    [Fact]
+    public void NTF001_WhenInterfaceNeedsSetterButUnderlyingIsInitOnly()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IWritable { int Value { get; set; } }
+                public class InitOnly { public int Value { get; init; } }
+                public class C
+                {
+                    public void M() { var x = new InitOnly().Duck<IWritable>(); }
+                }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
 }

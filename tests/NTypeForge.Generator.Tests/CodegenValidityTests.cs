@@ -248,4 +248,43 @@ public class CodegenValidityTests
             GeneratorTestHarness.GetGeneratedText(source),
             GeneratorTestHarness.GetGeneratedText(source));
     }
+
+    // An init-only interface property must be proxied with an `init` accessor (not `set`), or the
+    // proxy fails CS8854. The underlying here has a regular `set`, so the forwarding assignment is
+    // legal. Regression for the init-only codegen fix.
+    [Fact]
+    public void InitOnlyInterfaceProperty_OverWritableUnderlying_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IConfig { int Value { get; init; } }
+                public class Settings { public int Value { get; set; } }
+                public class C { public void M() { var x = new Settings().Duck<IConfig>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A read-write underlying ducked to a read-only interface is the most common property case: the
+    // proxy needs only a getter. It must match and compile.
+    [Fact]
+    public void ReadOnlyInterfaceProperty_OverWritableUnderlying_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IReadValue { int Value { get; } }
+                public class Settings { public int Value { get; set; } }
+                public class C { public void M() { var x = new Settings().Duck<IReadValue>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
 }

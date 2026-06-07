@@ -272,7 +272,7 @@ namespace NTypeForge.SourceGenerator
         }
 
         private static PropertySig ToPropertySig(IPropertySymbol p)
-            => new PropertySig(p.Name, Fq(p.Type), p.GetMethod != null, p.SetMethod != null);
+            => new PropertySig(p.Name, Fq(p.Type), p.GetMethod != null, p.SetMethod != null, p.SetMethod is { IsInitOnly: true });
 
         private static IndexerSig ToIndexerSig(IPropertySymbol p)
             => new IndexerSig(Fq(p.Type), p.Parameters.Select(ToParamSig).ToList(), p.GetMethod != null, p.SetMethod != null);
@@ -383,9 +383,25 @@ namespace NTypeForge.SourceGenerator
                     else
                     {
                         var sig = ToPropertySig(prop);
-                        if (prop.GetMethod != null) result.Add(new PropertySig(sig.Name, sig.TypeFq, true, false).CompatKey);
-                        if (prop.SetMethod != null) result.Add(new PropertySig(sig.Name, sig.TypeFq, false, true).CompatKey);
-                        if (prop.GetMethod != null && prop.SetMethod != null) result.Add(sig.CompatKey);
+                        var canGet = prop.GetMethod != null;
+                        // A regular `set` can forward both `set` and `init` requirements; an
+                        // init-only setter can forward neither (the proxy wraps an already-
+                        // constructed instance, so `_instance.X = value` is illegal - CS8852).
+                        // Advertise the writable capability only for a non-init setter, so an
+                        // init-only underlying is treated as effectively get-only and never
+                        // matched to a requirement it cannot fulfill.
+                        var canSet = prop.SetMethod is { IsInitOnly: false };
+                        if (canGet) result.Add(new PropertySig(sig.Name, sig.TypeFq, true, false, false).CompatKey);
+                        if (canSet)
+                        {
+                            result.Add(new PropertySig(sig.Name, sig.TypeFq, false, true, false).CompatKey);
+                            result.Add(new PropertySig(sig.Name, sig.TypeFq, false, true, true).CompatKey);
+                        }
+                        if (canGet && canSet)
+                        {
+                            result.Add(new PropertySig(sig.Name, sig.TypeFq, true, true, false).CompatKey);
+                            result.Add(new PropertySig(sig.Name, sig.TypeFq, true, true, true).CompatKey);
+                        }
                     }
                 }
                 else if (member is IEventSymbol evt)
@@ -832,7 +848,10 @@ namespace NTypeForge.SourceGenerator
                 sb.AppendLine($"        public {prop.TypeFq} {prop.Name}");
                 sb.AppendLine("        {");
                 if (prop.HasGet) sb.AppendLine($"            get => _instance.{prop.Name};");
-                if (prop.HasSet) sb.AppendLine($"            set => _instance.{prop.Name} = value;");
+                // Match the interface's accessor kind: an `init`-only property must be implemented
+                // with `init` (CS8854 otherwise). Structural matching guarantees the underlying has
+                // a regular `set` here, so forwarding `_instance.X = value` is legal.
+                if (prop.HasSet) sb.AppendLine($"            {(prop.IsInit ? "init" : "set")} => _instance.{prop.Name} = value;");
                 sb.AppendLine("        }");
             }
 

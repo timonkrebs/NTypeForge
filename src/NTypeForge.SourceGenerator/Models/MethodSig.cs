@@ -67,15 +67,23 @@ namespace NTypeForge.SourceGenerator.Models
         public string TypeFq { get; }
         public bool HasGet { get; }
         public bool HasSet { get; }
+        // True when the setter is init-only (`init` accessor). A proxy must declare the matching
+        // accessor kind (`init`, not `set`) or it fails CS8854, and it can only forward to an
+        // underlying member whose own setter is a regular `set` - see DuckTypingGenerator.
+        public bool IsInit { get; }
         public string CompatKey { get; }
 
-        public PropertySig(string name, string typeFq, bool hasGet, bool hasSet)
+        public PropertySig(string name, string typeFq, bool hasGet, bool hasSet, bool isInit)
         {
             Name = name;
             TypeFq = typeFq;
             HasGet = hasGet;
             HasSet = hasSet;
-            CompatKey = $"Property:{typeFq}:{name}:{(hasGet ? "G" : "")}:{(hasSet ? "S" : "")}";
+            IsInit = isInit;
+            // The setter slot distinguishes none / `set` / `init` so an init-only requirement never
+            // matches a key advertising a plain setter (and vice versa).
+            var setMarker = isInit ? "I" : (hasSet ? "S" : "");
+            CompatKey = $"Property:{typeFq}:{name}:{(hasGet ? "G" : "")}:{setMarker}";
         }
     }
 
