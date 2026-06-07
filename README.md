@@ -29,6 +29,7 @@ reflection, no runtime type inspection, no hand-written adapters.
 - [Limitations](#limitations)
 - [Diagnostics](#diagnostics)
 - [Development](#development)
+- [About](#about)
 
 ---
 
@@ -157,6 +158,11 @@ float result = asInterface.Calculate(10, 20); // 30
 If the type doesn't structurally match `T`, you get a clear compile-time error
 ([NTF001](#diagnostics)) instead of a runtime surprise.
 
+If the instance *already* satisfies `T` — nominally or through variance — no proxy is
+generated at all: `Duck<T>()` hands back the same instance unchanged (so
+`asInterface is IProxy<T>` is `false`). A proxy is created only when one is actually
+needed to bridge the gap.
+
 ### 3. Get the original instance back
 
 Every generated proxy implements `IProxy<T>`, so you can always recover the wrapped
@@ -178,7 +184,12 @@ if (proxy is IProxy<MyMath> p)
 
 NTypeForge also **prevents double-wrapping**: if you pass an existing proxy where a
 *different* interface is expected, it unwraps to the original instance and re-wraps
-once, rather than stacking a proxy on top of a proxy.
+once, rather than stacking a proxy on top of a proxy. This applies when the proxy's
+underlying concrete type is known to the current compilation (the common case — it was
+ducked in the same assembly). A proxy created in *another* assembly may get
+double-wrapped, but `Unbox<T>()` / `TryUnbox<T>()` still walk the whole chain back to
+the original instance — only a single-level `IProxy<T>.Inner` would observe the
+intermediate proxy.
 
 ---
 
@@ -228,6 +239,12 @@ callable). An `init`-only interface property is implemented with `init` — and 
 `init`-only *underlying* member is treated as get-only, since the proxy wraps an
 already-constructed instance and could never assign it.
 
+**Inherited members.** A concrete type satisfies a requirement with a matching public
+instance member whether it *declares* that member or *inherits* it from a base
+`class` — the proxy forwards inherited members just fine. (On the interface side,
+likewise, a target interface requires every member it inherits from its base
+interfaces.)
+
 ---
 
 ## How it works
@@ -240,23 +257,31 @@ The generator is an `IIncrementalGenerator`. It scans for two things:
 
 For each match it emits two pieces of code:
 
-**A proxy struct** that implements the target interface by forwarding to the wrapped
-instance, plus `IProxy<T>` so the instance can be recovered:
+**A proxy class** that implements the target interface by forwarding to the wrapped
+instance, plus `IProxy<T>` so the instance can be recovered. `IProxy` is implemented
+*explicitly*, so it never collides with an interface member that happens to be named
+`Inner` or `Unwrapped` (the real type name also carries a stable hash suffix for
+uniqueness, elided here):
 
 ```cs
-internal readonly struct AddCalculator_ICalculator_Proxy
+internal sealed class AddCalculator_ICalculator_Proxy
     : ICalculator, IProxy<AddCalculator>
 {
-    private readonly AddCalculator _instance;
+    // Not readonly: a struct underlying must stay mutable so settable members work.
+    private AddCalculator __ntf_instance;
 
-    public AddCalculator_ICalculator_Proxy(AddCalculator instance) => _instance = instance;
+    public AddCalculator_ICalculator_Proxy(AddCalculator instance) => __ntf_instance = instance;
 
-    public AddCalculator Inner    => _instance;     // from IProxy<AddCalculator>
-    object IProxy.Unwrapped       => _instance;     // from IProxy
+    AddCalculator IProxy<AddCalculator>.Inner => __ntf_instance;  // from IProxy<AddCalculator>
+    object IProxy.Unwrapped                   => __ntf_instance;  // from IProxy
 
-    public float Calculate(float a, float b) => _instance.Calculate(a, b);
+    public float Calculate(float a, float b) => __ntf_instance.Calculate(a, b);
 }
 ```
+
+It's a `class`, not a `struct`: a struct proxy would be boxed the instant it's passed
+as the interface (allocating anyway), and a *readonly* field would make a `struct`
+underlying impossible to mutate — see [Runtime overhead](#runtime-overhead).
 
 **A C# 14 extension member** that accepts the concrete type and forwards into the
 original method, wrapping the argument in the proxy:
@@ -272,6 +297,11 @@ public static class CalculatorManager_DuckTypingExtensions
 }
 ```
 
+The names above are simplified: the real proxy and extension-class names carry a
+stable hash suffix for uniqueness. And when the ducked argument's static type is an
+*interface* (rather than a concrete type as here), the forwarding method first emits
+`TryUnbox` branches to unwrap an existing proxy before re-wrapping it.
+
 The generated pipeline is fully cacheable: each call site is reduced to a
 value-equatable model (strings/enums only — no symbols held), so edits that don't
 change any duck-typing site skip regeneration.
@@ -284,12 +314,15 @@ NTypeForge avoids the usual cost of dynamic duck typing — **no reflection, no
 `DynamicObject`, no expression-tree compilation, no per-call dispatch setup.** A
 forwarding call is a direct method call through a one-field proxy.
 
-It is **not** zero-allocation, though. The proxy is a small `class`, so it costs
-**one heap allocation per call** (the wrapped instance plus a header). The win is
-structural: you pay one tiny object, not a reflection pipeline — and you keep full
-compile-time type checking. (An earlier design used a `struct` proxy, but it was
-boxed the instant it was passed as the interface — so it allocated anyway, while
-making a *struct* underlying impossible to proxy correctly.)
+It is **not** zero-allocation, though. The proxy is a small `class` — an object header
+plus a single field referencing the wrapped instance (for a `struct` underlying the
+value is copied inline into that field). Each *duck conversion* therefore costs **one
+heap allocation**: one per implicit-forwarding call site, or one per `Duck<T>()` call.
+Calls made *on* an already-created proxy are allocation-free direct forwards. The win
+is structural: you pay one tiny object, not a reflection pipeline — and you keep full
+compile-time type checking. (An earlier design used a `struct` proxy, but it was boxed
+the instant it was passed as the interface — so it allocated anyway, while making a
+*struct* underlying impossible to proxy correctly.)
 
 ## Compile-time implications
 
@@ -341,12 +374,13 @@ cost of binding that output on a rebuild.
 - **Public members only.** Structural matching counts a type's **public** members.
   A `private`/`protected`/`internal` member (or accessor) can't be forwarded by the
   proxy, so it never counts toward a match.
-- **Directly-declared members.** Matching considers a type's own declared members;
-  members it inherits from a base *class* are not counted toward the match.
-- **`static abstract` interface members are unsupported.** A proxy is an instance
-  object and can't implement a static member that has no default implementation.
-  Such an interface can't be proxied (a `static` member *with* a default
-  implementation is fine — it's supplied by the interface itself).
+- **Some interface members can't be proxied.** A `static abstract` member can't be
+  implemented by an instance proxy, so such an interface can't be proxied (a `static`
+  member *with* a default implementation is fine — it's supplied by the interface
+  itself). The same goes for a member that returns *by `ref`*, or whose signature
+  involves a *pointer* / *function-pointer* type. Note this is the `ref`-**return**
+  case: `ref`/`out`/`in` **parameters** are fully supported. On a `Duck<T>()` call any
+  of these reports [NTF002](#diagnostics).
 - **`init`-only underlying members are effectively read-only.** A proxy wraps an
   already-constructed instance, so it can satisfy a settable interface requirement
   only when the underlying setter is a regular `set`.

@@ -205,4 +205,27 @@ public class MemberDuckingRuntimeTests
 
         Assert.Same(box, view);
     }
+
+    public interface IGrid { int this[int x, int y] { get; set; } }
+
+    public class Grid
+    {
+        private readonly int[,] _cells = new int[4, 4];
+        public int this[int x, int y] { get => _cells[x, y]; set => _cells[x, y] = value; }
+    }
+
+    // A multi-parameter indexer: the proxy must rename and forward BOTH positional arguments, in
+    // order, on get and set. Exercises the multi-arg path of EmitProxyIndexer end-to-end.
+    [Fact]
+    public void MultiParameterIndexer_GetAndSet_ForwardBothArgsThroughProxy()
+    {
+        var grid = new Grid();
+        IGrid view = grid.Duck<IGrid>();
+
+        view[1, 2] = 99;
+
+        Assert.Equal(99, view[1, 2]);  // read back through the proxy
+        Assert.Equal(99, grid[1, 2]);  // landed on the underlying at the right cell
+        Assert.Equal(0, grid[2, 1]);   // arguments were not transposed
+    }
 }

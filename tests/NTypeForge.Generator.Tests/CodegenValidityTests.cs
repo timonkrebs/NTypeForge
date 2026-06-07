@@ -403,6 +403,25 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
+    // A plain `in` parameter (RefKind.In) takes a different emit branch than `ref readonly`; the
+    // proxy must reproduce the `in` modifier on both the method signature and the forwarded call.
+    [Fact]
+    public void InParameter_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IConsumer { void Use(in int value); }
+                public class Consumer { public void Use(in int value) { } }
+                public class C { public void M() { var x = new Consumer().Duck<IConsumer>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
     [Fact]
     public void DefaultInterfaceMethod_DoesNotRequireConcreteMember()
     {
@@ -660,6 +679,26 @@ public class CodegenValidityTests
                 public interface IReadIdx { string this[int i] { get; } }
                 public class Store { public string this[int i] { get => ""; set { } } }
                 public class C { public void M() { var x = new Store().Duck<IReadIdx>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A multi-parameter indexer: the proxy must render and forward BOTH parameters in the `this[..]`
+    // signature and the forwarding call. Single-parameter indexers cover the common path; this
+    // exercises the multi-arg rendering in EmitProxyIndexer.
+    [Fact]
+    public void MultiParameterIndexer_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IGrid { int this[int x, int y] { get; set; } }
+                public class Grid { public int this[int x, int y] { get => 0; set { } } }
+                public class C { public void M() { var x = new Grid().Duck<IGrid>(); } }
             }
             """;
 
