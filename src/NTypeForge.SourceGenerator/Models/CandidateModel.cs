@@ -47,6 +47,9 @@ namespace NTypeForge.SourceGenerator.Models
         public string OriginalReturnTypeFq { get; }
         public bool OriginalReturnsVoid { get; }
         public IReadOnlyList<ParamSig> OriginalParameters { get; }
+        public int OriginalArity { get; }
+        public IReadOnlyList<string> OriginalTypeParameters { get; }
+        public IReadOnlyList<string> OriginalConstraints { get; }
 
         // Members the proxy must implement (interface + inherited, deduped). Also used as the
         // structural requirement when matching this interface against other concrete types.
@@ -81,6 +84,7 @@ namespace NTypeForge.SourceGenerator.Models
             int argumentIndex, bool isStatic, bool isDuckCall,
             string originalMethodName, string originalContainingTypeFq, bool originalIsExtensionMethod,
             string originalReturnTypeFq, bool originalReturnsVoid, IReadOnlyList<ParamSig> originalParameters,
+            int originalArity, IReadOnlyList<string> originalTypeParameters, IReadOnlyList<string> originalConstraints,
             IReadOnlyList<MethodSig> methodRequirements,
             IReadOnlyList<PropertySig> propertyRequirements,
             IReadOnlyList<IndexerSig> indexerRequirements,
@@ -111,6 +115,9 @@ namespace NTypeForge.SourceGenerator.Models
             OriginalReturnTypeFq = originalReturnTypeFq;
             OriginalReturnsVoid = originalReturnsVoid;
             OriginalParameters = originalParameters;
+            OriginalArity = originalArity;
+            OriginalTypeParameters = originalTypeParameters;
+            OriginalConstraints = originalConstraints;
             MethodRequirements = methodRequirements;
             PropertyRequirements = propertyRequirements;
             IndexerRequirements = indexerRequirements;
@@ -127,6 +134,8 @@ namespace NTypeForge.SourceGenerator.Models
         private string BuildKey()
         {
             var prms = string.Join(",", OriginalParameters.Select(p => p.Key));
+            var tps = string.Join(",", OriginalTypeParameters);
+            var constraints = string.Join(",", OriginalConstraints);
             var reqs = string.Join(",", MethodRequirements.Select(m => m.CompatKey));
             var props = string.Join(",", PropertyRequirements.Select(p => p.CompatKey));
             var idxs = string.Join(",", IndexerRequirements.Select(i => i.CompatKey));
@@ -138,6 +147,7 @@ namespace NTypeForge.SourceGenerator.Models
                 InterfaceFq, ArgumentIndex, IsStatic, IsDuckCall,
                 OriginalMethodName, OriginalContainingTypeFq, OriginalIsExtensionMethod,
                 OriginalReturnTypeFq, OriginalReturnsVoid, prms,
+                OriginalArity, tps, constraints,
                 reqs, props, idxs, evts, surface, IsSelfMatch, UnsupportedMemberName ?? "",
                 DiagFilePath ?? "", DiagSpan.Start, DiagSpan.Length);
         }

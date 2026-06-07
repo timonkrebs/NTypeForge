@@ -140,7 +140,33 @@ public class CodegenValidityTests
                     {
                         var m = new Mgr();
                         _ = m.H(new Adder(), 1);
+                        _ = m.H<int>(new Adder(), 2);
                         _ = m.H(new Adder(), "s");
+                        _ = m.H<string>(new Adder(), "t");
+                    }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void MethodArgumentDucking_WithGenericMethodConstraints_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public TValue H<TValue>(ICalc c) where TValue : unmanaged => default;
+                    public void M()
+                    {
+                        var m = new Mgr();
+                        _ = m.H<int>(new Adder());
                     }
                 }
             }

@@ -403,12 +403,15 @@ namespace NTypeForge.SourceGenerator
             bool isSelfMatch = StructuralMatch.IsSatisfiedBy(
                 requirements.Methods, requirements.Properties, requirements.Indexers, requirements.Events, surfaceSet);
 
-            var originalParams = originalMethod == null
+            var originalDefinition = originalMethod == null ? null : OriginalExtensionDefinition(originalMethod);
+            var unconstructedMethod = originalDefinition?.OriginalDefinition;
+
+            var originalParams = unconstructedMethod == null
                 ? (IReadOnlyList<ParamSig>)Array.Empty<ParamSig>()
-                : ForwardedParameters(originalMethod).Select(MemberSignatures.ToParamSig).ToList();
+                : ForwardedParameters(unconstructedMethod).Select(MemberSignatures.ToParamSig).ToList();
+            var originalSig = unconstructedMethod == null ? null : MemberSignatures.ToMethodSig(unconstructedMethod);
 
             var loc = invocation.GetLocation();
-            var originalDefinition = originalMethod == null ? null : OriginalExtensionDefinition(originalMethod);
 
             return new CandidateModel(
                 targetFq: SymbolNames.Fq(target),
@@ -430,9 +433,12 @@ namespace NTypeForge.SourceGenerator
                 originalMethodName: originalMethod?.Name ?? "",
                 originalContainingTypeFq: originalDefinition?.ContainingType == null ? "" : SymbolNames.Fq(originalDefinition.ContainingType),
                 originalIsExtensionMethod: originalMethod != null && IsExtensionLike(originalMethod),
-                originalReturnTypeFq: originalMethod == null ? "" : SymbolNames.Fq(originalMethod.ReturnType),
-                originalReturnsVoid: originalMethod != null && originalMethod.ReturnType.SpecialType == SpecialType.System_Void,
+                originalReturnTypeFq: unconstructedMethod == null ? "" : SymbolNames.Fq(unconstructedMethod.ReturnType),
+                originalReturnsVoid: unconstructedMethod != null && unconstructedMethod.ReturnType.SpecialType == SpecialType.System_Void,
                 originalParameters: originalParams,
+                originalArity: originalSig?.Arity ?? 0,
+                originalTypeParameters: originalSig?.TypeParameters ?? Array.Empty<string>(),
+                originalConstraints: originalSig?.Constraints ?? Array.Empty<string>(),
                 methodRequirements: requirements.Methods,
                 propertyRequirements: requirements.Properties,
                 indexerRequirements: requirements.Indexers,
