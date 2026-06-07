@@ -408,7 +408,7 @@ namespace NTypeForge.SourceGenerator
         // Maps an arbitrary type display name to a valid C# identifier fragment: every character
         // that isn't a letter, digit, or underscore becomes '_', and a leading digit is prefixed.
         // This keeps generic/array/nested type names (e.g. `Holder<int, string>`) from producing
-        // illegal struct names.
+        // illegal type names.
         private static string Sanitize(string name)
         {
             if (string.IsNullOrEmpty(name)) return "_";

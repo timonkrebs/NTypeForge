@@ -165,16 +165,15 @@ namespace NTypeForge.SourceGenerator
             return result;
         }
 
-        // Identifies the forwarding method an interpretation would emit: the (static-ness, name,
-        // ducked-argument position, target interface, remaining parameter shape). Equal keys are
-        // interchangeable; differing keys are a real ambiguity the user must resolve.
+        // Identifies the forwarding method an interpretation would emit: its declaring type, which
+        // argument is ducked, and the method's canonical signature key. Reusing MethodSig.DedupKey
+        // (name + arity + full parameter shape incl. ref kinds + constraints, generics-normalized)
+        // keeps this notion of "same method" from drifting from the rest of the generator and folds
+        // in cases a hand-rolled key missed - e.g. two overloads differing only by a ref kind, or two
+        // same-signature methods on different declaring types. Equal keys are interchangeable;
+        // differing keys are a real ambiguity the user must resolve.
         private static string InterpretationKey(IMethodSymbol candidate, int argIndex)
-        {
-            var shape = string.Join(",", candidate.Parameters.Select((p, i) =>
-                i == argIndex ? "DUCK" : $"{p.RefKind}:{SymbolNames.Fq(p.Type)}"));
-            return $"{(candidate.IsStatic ? "s" : "i")}|{candidate.Name}|{argIndex}|" +
-                   $"{SymbolNames.Fq(candidate.Parameters[argIndex].Type)}|{shape}";
-        }
+            => $"{SymbolNames.Fq(candidate.ContainingType)}|{argIndex}|{MemberSignatures.ToMethodSig(candidate).DedupKey}";
 
         private static List<(IMethodSymbol Candidate, int ArgIndex)> CollectDuckableArgumentSites(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)

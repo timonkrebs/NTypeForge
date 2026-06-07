@@ -355,6 +355,28 @@ public class DiagnosticTests
         Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
     }
 
+    // Ambiguity can also come from two same-named methods on *different declaring types* (here two
+    // extension methods on Impl). They share name/argument-position/parameter-shape, so the duckable
+    // interpretation must be distinguished by its declaring type - otherwise they collapse to one and
+    // the genuinely-ambiguous call gets rewired to an arbitrary one. No proxy must be emitted.
+    [Fact]
+    public void AmbiguousDuckAcrossDeclaringTypes_IsNotRewired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IFoo { int Do(); }
+                public class Impl { public int Do() => 1; }
+                public static class A { public static void Use(this Impl x, IFoo f) {} }
+                public static class B { public static void Use(this Impl x, IFoo f) {} }
+                public class C { public void M() { new Impl().Use(new Impl()); } }
+            }
+            """;
+
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+    }
+
     // A static-qualified `DuckExtensions.Duck<T>(x)` cannot bind to the generated instance extension
     // member, so it is not a duck site. The analyzer must not mistake the `DuckExtensions` type for
     // the ducked instance and report a spurious NTF001 against it.
