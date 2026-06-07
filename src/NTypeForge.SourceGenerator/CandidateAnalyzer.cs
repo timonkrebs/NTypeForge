@@ -45,6 +45,36 @@ namespace NTypeForge.SourceGenerator
             => !type.IsRefLikeType &&
                (type.TypeKind == TypeKind.Class || type.TypeKind == TypeKind.Struct || type.TypeKind == TypeKind.Interface);
 
+        private static bool IsUsableFromGeneratedTopLevelCode(ITypeSymbol type)
+        {
+            switch (type)
+            {
+                case IArrayTypeSymbol array:
+                    return IsUsableFromGeneratedTopLevelCode(array.ElementType);
+                case IPointerTypeSymbol pointer:
+                    return IsUsableFromGeneratedTopLevelCode(pointer.PointedAtType);
+                case INamedTypeSymbol named:
+                    foreach (var arg in named.TypeArguments)
+                    {
+                        if (!IsUsableFromGeneratedTopLevelCode(arg)) return false;
+                    }
+                    for (INamedTypeSymbol? current = named; current != null; current = current.ContainingType)
+                    {
+                        if (!IsTypeAccessibilityUsable(current.DeclaredAccessibility)) return false;
+                    }
+                    return true;
+                case ITypeParameterSymbol:
+                    return true;
+                default:
+                    return true;
+            }
+        }
+
+        private static bool IsTypeAccessibilityUsable(Accessibility accessibility)
+            => accessibility == Accessibility.Public ||
+               accessibility == Accessibility.Internal ||
+               accessibility == Accessibility.ProtectedOrInternal;
+
         private static ITypeSymbol GetUnderlyingType(ITypeSymbol type)
         {
             bool IsProxyInterface(ITypeSymbol t)
@@ -89,6 +119,10 @@ namespace NTypeForge.SourceGenerator
             var targetInterface = resolved.TypeArguments[0];
             var underlyingType = GetUnderlyingType(argType);
             if (targetInterface.TypeKind != TypeKind.Interface || !IsProxyableKind(underlyingType)) return null;
+            if (!IsUsableFromGeneratedTopLevelCode(argType) ||
+                !IsUsableFromGeneratedTopLevelCode(underlyingType) ||
+                !IsUsableFromGeneratedTopLevelCode(targetInterface))
+                return null;
 
             // The instance already satisfies the interface (nominally or via variance), so no proxy
             // is needed: the runtime Duck<T> fallback's `instance is T` returns it directly.
@@ -137,12 +171,19 @@ namespace NTypeForge.SourceGenerator
             var sites = DistinctInterpretations(CollectDuckableArgumentSites(invocation, semanticModel, symbolInfo));
             if (sites.Count != 1) return null;
 
-            var (candidate, argIndex) = sites[0];
-            var argType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[argIndex].Expression).Type!;
+            var (candidate, paramIndex, syntaxIndex) = sites[0];
+            var argType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[syntaxIndex].Expression).Type!;
+            var underlyingType = GetUnderlyingType(argType);
+            if (!IsUsableFromGeneratedTopLevelCode(candidate.ContainingType!) ||
+                !IsUsableFromGeneratedTopLevelCode(argType) ||
+                !IsUsableFromGeneratedTopLevelCode(underlyingType) ||
+                !IsUsableFromGeneratedTopLevelCode(candidate.Parameters[paramIndex].Type))
+                return null;
+
             return BuildModel(
                 invocation, target: candidate.ContainingType!, argType: argType,
-                underlyingType: GetUnderlyingType(argType), interfaceType: candidate.Parameters[argIndex].Type,
-                argumentIndex: argIndex, isStatic: candidate.IsStatic, isDuckCall: false,
+                underlyingType: underlyingType, interfaceType: candidate.Parameters[paramIndex].Type,
+                argumentIndex: paramIndex, isStatic: candidate.IsStatic, isDuckCall: false,
                 originalMethod: candidate);
         }
 
@@ -150,17 +191,17 @@ namespace NTypeForge.SourceGenerator
         // override and the base it hides, or a symbol Roslyn lists more than once - so they don't
         // count as a false ambiguity. Genuinely distinct interpretations (different target interface
         // or different remaining parameters) survive as separate entries.
-        private static List<(IMethodSymbol Candidate, int ArgIndex)> DistinctInterpretations(
-            List<(IMethodSymbol Candidate, int ArgIndex)> sites)
+        private static List<(IMethodSymbol Candidate, int ParamIndex, int SyntaxIndex)> DistinctInterpretations(
+            List<(IMethodSymbol Candidate, int ParamIndex, int SyntaxIndex)> sites)
         {
             // Nothing to dedup with 0 or 1 sites (the common case); skip the HashSet and key strings.
             if (sites.Count <= 1) return sites;
 
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            var result = new List<(IMethodSymbol Candidate, int ArgIndex)>();
+            var result = new List<(IMethodSymbol Candidate, int ParamIndex, int SyntaxIndex)>();
             foreach (var site in sites)
             {
-                if (seen.Add(InterpretationKey(site.Candidate, site.ArgIndex))) result.Add(site);
+                if (seen.Add(InterpretationKey(site.Candidate, site.ParamIndex))) result.Add(site);
             }
             return result;
         }
@@ -175,37 +216,41 @@ namespace NTypeForge.SourceGenerator
         private static string InterpretationKey(IMethodSymbol candidate, int argIndex)
             => $"{SymbolNames.Fq(candidate.ContainingType)}|{argIndex}|{MemberSignatures.ToMethodSig(candidate).DedupKey}";
 
-        private static List<(IMethodSymbol Candidate, int ArgIndex)> CollectDuckableArgumentSites(
+        private static List<(IMethodSymbol Candidate, int ParamIndex, int SyntaxIndex)> CollectDuckableArgumentSites(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
         {
-            var sites = new List<(IMethodSymbol, int)>();
+            var sites = new List<(IMethodSymbol, int, int)>();
             foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
             {
                 if (candidate.ContainingType == null) continue;
                 var arguments = invocation.ArgumentList.Arguments;
-                if (arguments.Count != candidate.Parameters.Length) continue;
+                if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) continue;
 
-                AddDuckableArgIndices(semanticModel, candidate, arguments, sites);
+                AddDuckableArgIndices(semanticModel, candidate, arguments, parameterIndices, sites);
             }
             return sites;
         }
 
         private static void AddDuckableArgIndices(
             SemanticModel semanticModel, IMethodSymbol candidate,
-            SeparatedSyntaxList<ArgumentSyntax> arguments, List<(IMethodSymbol, int)> sites)
+            SeparatedSyntaxList<ArgumentSyntax> arguments, IReadOnlyList<int> parameterIndices,
+            List<(IMethodSymbol, int, int)> sites)
         {
-            for (int i = 0; i < arguments.Count; i++)
+            for (int syntaxIndex = 0; syntaxIndex < arguments.Count; syntaxIndex++)
             {
-                if (IsDuckableArgument(semanticModel, candidate, arguments, i)) sites.Add((candidate, i));
+                var paramIndex = parameterIndices[syntaxIndex];
+                if (IsDuckableArgument(semanticModel, candidate, arguments, syntaxIndex, paramIndex))
+                    sites.Add((candidate, paramIndex, syntaxIndex));
             }
         }
 
         private static bool IsDuckableArgument(
-            SemanticModel semanticModel, IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments, int i)
+            SemanticModel semanticModel, IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments,
+            int syntaxIndex, int paramIndex)
         {
-            var arg = arguments[i];
+            var arg = arguments[syntaxIndex];
             var argType = semanticModel.GetTypeInfo(arg.Expression).Type;
-            var paramType = candidate.Parameters[i].Type;
+            var paramType = candidate.Parameters[paramIndex].Type;
 
             if (argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
 
@@ -213,6 +258,51 @@ namespace NTypeForge.SourceGenerator
             if (conversion.Exists && conversion.IsImplicit) return false;
 
             return IsProxyableKind(GetUnderlyingType(argType));
+        }
+
+        private static bool TryMapArgumentsToParameters(
+            SeparatedSyntaxList<ArgumentSyntax> arguments, IMethodSymbol candidate, out List<int> parameterIndices)
+        {
+            parameterIndices = new List<int>(arguments.Count);
+            var used = new HashSet<int>();
+            int nextPositional = 0;
+
+            foreach (var arg in arguments)
+            {
+                int paramIndex;
+                if (arg.NameColon != null)
+                {
+                    var name = arg.NameColon.Name.Identifier.ValueText;
+                    paramIndex = FindParameter(candidate, name);
+                    if (paramIndex < 0 || used.Contains(paramIndex)) return false;
+                }
+                else
+                {
+                    while (nextPositional < candidate.Parameters.Length && used.Contains(nextPositional))
+                        nextPositional++;
+                    if (nextPositional >= candidate.Parameters.Length) return false;
+                    paramIndex = nextPositional++;
+                }
+
+                parameterIndices.Add(paramIndex);
+                used.Add(paramIndex);
+            }
+
+            for (int i = 0; i < candidate.Parameters.Length; i++)
+            {
+                if (!used.Contains(i) && !candidate.Parameters[i].IsOptional) return false;
+            }
+
+            return true;
+        }
+
+        private static int FindParameter(IMethodSymbol candidate, string name)
+        {
+            for (int i = 0; i < candidate.Parameters.Length; i++)
+            {
+                if (candidate.Parameters[i].Name == name) return i;
+            }
+            return -1;
         }
 
         private static CandidateModel BuildModel(

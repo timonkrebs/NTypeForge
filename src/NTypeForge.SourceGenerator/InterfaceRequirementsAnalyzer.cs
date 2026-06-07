@@ -99,7 +99,7 @@ namespace NTypeForge.SourceGenerator
             public void Observe(ISymbol member)
             {
                 TrackUnsupported(member);
-                if (!member.IsStatic) Bucket(member);
+                if (!member.IsStatic && member.IsAbstract) Bucket(member);
             }
 
             public InterfaceRequirements Build()

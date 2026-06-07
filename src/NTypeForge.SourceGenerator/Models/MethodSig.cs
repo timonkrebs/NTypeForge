@@ -14,16 +14,20 @@ namespace NTypeForge.SourceGenerator.Models
         public string TypeFq { get; }
         public RefKind RefKind { get; }
         public string Name { get; }
+        public bool IsOptional { get; }
+        public string? DefaultValueSource { get; }
 
         // Canonical identity of a parameter, including its name (which affects generated signatures).
         public string Key { get; }
 
-        public ParamSig(string typeFq, RefKind refKind, string name)
+        public ParamSig(string typeFq, RefKind refKind, string name, bool isOptional = false, string? defaultValueSource = null)
         {
             TypeFq = typeFq;
             RefKind = refKind;
             Name = name;
-            Key = $"{refKind}:{typeFq}:{name}";
+            IsOptional = isOptional;
+            DefaultValueSource = defaultValueSource;
+            Key = $"{refKind}:{typeFq}:{name}:{isOptional}:{defaultValueSource ?? ""}";
         }
 
         // The canonical parameter-shape encoding (ref kind + type, no names) shared by every key

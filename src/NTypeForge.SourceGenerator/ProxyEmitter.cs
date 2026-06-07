@@ -227,10 +227,10 @@ namespace NTypeForge.SourceGenerator
             // The forwarding call's argument list, with the duck-typed argument replaced by
             // `argReplacement` and every other parameter passed through verbatim.
             string CallArgs(string argReplacement) => string.Join(", ", parameters.Select((p, idx) =>
-                idx == argIndex ? argReplacement : $"{RefPrefix(p.RefKind)}{SymbolNames.Escape(p.Name)}"));
+                idx == argIndex ? argReplacement : $"{RefArgumentPrefix(p.RefKind)}{SymbolNames.Escape(p.Name)}"));
 
             var methodParams = string.Join(", ", parameters.Select((p, idx) =>
-                $"{RefPrefix(p.RefKind)}{(idx == argIndex ? candidate.ArgumentFq : p.TypeFq)} {SymbolNames.Escape(p.Name)}"));
+                $"{RefPrefix(p.RefKind)}{(idx == argIndex ? candidate.ArgumentFq : p.TypeFq)} {SymbolNames.Escape(p.Name)}{DefaultSuffix(p)}"));
 
             var methodSig = $"{methodName}({methodParams})";
             if (!generatedMethods.Add(methodSig)) return;
@@ -318,7 +318,7 @@ namespace NTypeForge.SourceGenerator
             var name = SymbolNames.Escape(method.Name);
             var typeParams = method.Arity > 0 ? $"<{string.Join(", ", method.TypeParameters)}>" : "";
             var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {SymbolNames.Escape(p.Name)}"));
-            var argsStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{SymbolNames.Escape(p.Name)}"));
+            var argsStr = string.Join(", ", method.Parameters.Select(p => $"{RefArgumentPrefix(p.RefKind)}{SymbolNames.Escape(p.Name)}"));
 
             sb.AppendLine($"        public {method.ReturnTypeFq} {name}{typeParams}({parametersStr})");
             foreach (var constraint in method.Constraints)
@@ -350,7 +350,7 @@ namespace NTypeForge.SourceGenerator
             // collides with the setter's implicit `value`, etc.
             var names = idx.Parameters.Select((_, i) => $"__ntf_a{i}").ToList();
             var parametersStr = string.Join(", ", idx.Parameters.Select((p, i) => $"{RefPrefix(p.RefKind)}{p.TypeFq} {names[i]}"));
-            var argsStr = string.Join(", ", idx.Parameters.Select((p, i) => $"{RefPrefix(p.RefKind)}{names[i]}"));
+            var argsStr = string.Join(", ", idx.Parameters.Select((p, i) => $"{RefArgumentPrefix(p.RefKind)}{names[i]}"));
             sb.AppendLine($"        public {idx.TypeFq} this[{parametersStr}]");
             sb.AppendLine("        {");
             if (idx.HasGet) sb.AppendLine($"            get => __ntf_instance[{argsStr}];");
@@ -380,7 +380,26 @@ namespace NTypeForge.SourceGenerator
             => $"global::{underlyingNamespace}.{GetProxyTypeName(underlyingMinimalName, underlyingFq, interfaceMinimalName, interfaceFq)}";
 
         private static string RefPrefix(RefKind refKind)
-            => refKind switch { RefKind.Ref => "ref ", RefKind.Out => "out ", RefKind.In => "in ", _ => "" };
+            => refKind switch
+            {
+                RefKind.Ref => "ref ",
+                RefKind.Out => "out ",
+                RefKind.In => "in ",
+                RefKind.RefReadOnly or RefKind.RefReadOnlyParameter => "ref readonly ",
+                _ => ""
+            };
+
+        private static string RefArgumentPrefix(RefKind refKind)
+            => refKind switch
+            {
+                RefKind.Ref => "ref ",
+                RefKind.Out => "out ",
+                RefKind.In or RefKind.RefReadOnly or RefKind.RefReadOnlyParameter => "in ",
+                _ => ""
+            };
+
+        private static string DefaultSuffix(ParamSig parameter)
+            => parameter.IsOptional ? $" = {parameter.DefaultValueSource ?? "default"}" : "";
 
         // A generated identifier (e.g. the extension receiver) that does not collide with any
         // user-derived name in `taken`; prepends `_` until unique. Normally returns `desired`.

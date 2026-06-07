@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Microsoft.CodeAnalysis;
 using NTypeForge.SourceGenerator.Models;
@@ -12,7 +13,12 @@ namespace NTypeForge.SourceGenerator
     internal static class MemberSignatures
     {
         public static ParamSig ToParamSig(IParameterSymbol p)
-            => new ParamSig(SymbolNames.Fq(p.Type), p.RefKind, p.Name);
+            => new ParamSig(
+                SymbolNames.Fq(p.Type),
+                p.RefKind,
+                p.Name,
+                p.IsOptional,
+                p.IsOptional ? DefaultValueSource(p) : null);
 
         public static MethodSig ToMethodSig(IMethodSymbol m)
         {
@@ -106,5 +112,58 @@ namespace NTypeForge.SourceGenerator
             }
             return parts.Count > 0 ? $"|{string.Join("|", parts)}" : "";
         }
+
+        private static string DefaultValueSource(IParameterSymbol p)
+        {
+            if (!p.HasExplicitDefaultValue) return "default";
+
+            var value = p.ExplicitDefaultValue;
+            if (value == null) return "null";
+            if (p.Type.TypeKind == TypeKind.Enum)
+            {
+                return $"({SymbolNames.Fq(p.Type)}){Convert.ToInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)}";
+            }
+
+            switch (value)
+            {
+                case bool b: return b ? "true" : "false";
+                case char c: return CharLiteral(c);
+                case string s: return StringLiteral(s);
+                case float f: return f.ToString("R", CultureInfo.InvariantCulture) + "f";
+                case double d: return d.ToString("R", CultureInfo.InvariantCulture) + "d";
+                case decimal m: return m.ToString(CultureInfo.InvariantCulture) + "m";
+                case sbyte or byte or short or ushort or int or uint or long or ulong:
+                    return Convert.ToString(value, CultureInfo.InvariantCulture) ?? "default";
+                default:
+                    return "default";
+            }
+        }
+
+        private static string StringLiteral(string value)
+        {
+            var chars = value.Select(EscapeChar);
+            return $"\"{string.Concat(chars)}\"";
+        }
+
+        private static string CharLiteral(char value)
+            => $"'{EscapeChar(value)}'";
+
+        private static string EscapeChar(char value)
+            => value switch
+            {
+                '\'' => "\\'",
+                '"' => "\\\"",
+                '\\' => "\\\\",
+                '\0' => "\\0",
+                '\a' => "\\a",
+                '\b' => "\\b",
+                '\f' => "\\f",
+                '\r' => "\\r",
+                '\n' => "\\n",
+                '\t' => "\\t",
+                '\v' => "\\v",
+                _ when char.IsControl(value) => "\\u" + ((int)value).ToString("x4", CultureInfo.InvariantCulture),
+                _ => value.ToString()
+            };
     }
 }

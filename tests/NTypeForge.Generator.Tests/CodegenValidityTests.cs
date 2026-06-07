@@ -43,6 +43,46 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
+    [Fact]
+    public void MethodArgumentDucking_WithNamedReorderedArguments_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(int offset, ICalc c) => c.Add(1, 2) + offset;
+                    public void M() { var m = new Mgr(); m.H(c: new Adder(), offset: 3); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void MethodArgumentDucking_WithOmittedOptionalArgument_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ICalc c, int offset = 3) => c.Add(1, 2) + offset;
+                    public void M() { var m = new Mgr(); m.H(new Adder()); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
     // Regression for the Sanitize fix: a two-type-argument generic underlying renders as
     // `Holder<int, string>`, whose comma/space previously leaked into the proxy's struct name and
     // produced ~40 parser errors. The strict sanitizer must yield a valid identifier.
@@ -79,6 +119,46 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
+    [Fact]
+    public void PrivateNestedUnderlying_DoesNotEmitInaccessibleProxy()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IBox { int Get(); }
+                public class Outer
+                {
+                    private class Inner { public int Get() => 0; }
+                    public void M() { var x = new Inner().Duck<IBox>(); }
+                }
+            }
+            """;
+
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void PrivateNestedInterface_DoesNotEmitInaccessibleProxy()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public class Box { public int Get() => 0; }
+                public class Outer
+                {
+                    private interface IBox { int Get(); }
+                    public void M() { var x = new Box().Duck<IBox>(); }
+                }
+            }
+            """;
+
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
     // A generic underlying ducked to an interface with a closed-generic parameter exercises angle
     // brackets in both the proxy name and the forwarded method signature.
     [Fact]
@@ -112,6 +192,40 @@ public class CodegenValidityTests
             """;
 
         Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void RefReadonlyParameter_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IConsumer { void Use(ref readonly int value); }
+                public class Consumer { public void Use(ref readonly int value) { } }
+                public class C { public void M() { var x = new Consumer().Duck<IConsumer>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void DefaultInterfaceMethod_DoesNotRequireConcreteMember()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IDefault { int Value() => 1; }
+                public class Empty { }
+                public class C { public void M() { var x = new Empty().Duck<IDefault>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
