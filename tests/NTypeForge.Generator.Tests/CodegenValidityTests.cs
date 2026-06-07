@@ -483,6 +483,68 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
+    // Same-named inherited properties with different types are distinct interface slots, not one
+    // merged requirement. A concrete exposing only one type must not be accepted as a structural
+    // match, or the generated proxy would fail to implement the other inherited slot.
+    [Fact]
+    public void SameNamedInheritedPropertiesWithDifferentTypes_AreBothRequired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IIntValue { int V { get; } }
+                public interface IStringValue { string V { get; } }
+                public interface IBoth : IIntValue, IStringValue { }
+                public class Impl { public int V => 1; }
+                public class C { public void M() { var x = new Impl().Duck<IBoth>(); } }
+            }
+            """;
+
+        Assert.True(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+    }
+
+    // Same parameter shape is not enough to merge inherited indexers: the return type is part of
+    // the required slot for structural matching.
+    [Fact]
+    public void SameShapeInheritedIndexersWithDifferentReturnTypes_AreBothRequired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IIntIndexer { int this[int i] { get; } }
+                public interface IStringIndexer { string this[int i] { get; } }
+                public interface IBoth : IIntIndexer, IStringIndexer { }
+                public class Impl { public int this[int i] => i; }
+                public class C { public void M() { var x = new Impl().Duck<IBoth>(); } }
+            }
+            """;
+
+        Assert.True(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+    }
+
+    // Events with the same inherited name but different delegate types are distinct slots. Keeping
+    // only the first event lets a partial concrete through and emits an incomplete proxy.
+    [Fact]
+    public void SameNamedInheritedEventsWithDifferentTypes_AreBothRequired()
+    {
+        const string source = """
+            using System;
+            using NTypeForge;
+            namespace T
+            {
+                public interface IActionEvent { event Action Changed; }
+                public interface IHandlerEvent { event EventHandler Changed; }
+                public interface IBoth : IActionEvent, IHandlerEvent { }
+                public class Impl { public event Action Changed; }
+                public class C { public void M() { var x = new Impl().Duck<IBoth>(); } }
+            }
+            """;
+
+        Assert.True(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+    }
+
     // Two distinct types in one namespace whose minimal names sanitize to the same identifier
     // (`Foo<int>` -> `Foo_int_` and a class literally named `Foo_int_`) must not produce
     // colliding proxy struct names (CS0101). The struct name is hash-disambiguated.

@@ -129,7 +129,7 @@ namespace NTypeForge.SourceGenerator
                         break;
                     case IEventSymbol evt:
                         var e = MemberSignatures.ToEventSig(evt);
-                        if (_seenEvents.Add(e.Name)) _events.Add(e);
+                        if (_seenEvents.Add(e.CompatKey)) _events.Add(e);
                         break;
                 }
             }
@@ -137,29 +137,35 @@ namespace NTypeForge.SourceGenerator
             // A property name can appear across several base interfaces with different accessor sets
             // (e.g. IGet declares `{ get; }`, IGetSet declares `{ get; set; }`). The interface requires
             // the UNION of accessors, so merge rather than keep-first - otherwise the proxy omits an
-            // accessor and fails CS0535. Merge is commutative, so the result is order-independent.
+            // accessor and fails CS0535. Only declarations with the same name AND type are the same
+            // structural slot; same-named inherited properties with different types are distinct
+            // interface requirements and must both be preserved.
             private void AddOrMergeProperty(PropertySig sig)
             {
-                if (_propertyIndex.TryGetValue(sig.Name, out var i))
+                var key = $"{sig.Name}:{sig.TypeFq}";
+                if (_propertyIndex.TryGetValue(key, out var i))
                 {
                     _properties[i] = MergeProperty(_properties[i], sig);
                 }
                 else
                 {
-                    _propertyIndex[sig.Name] = _properties.Count;
+                    _propertyIndex[key] = _properties.Count;
                     _properties.Add(sig);
                 }
             }
 
             private void AddOrMergeIndexer(IndexerSig sig)
             {
-                if (_indexerIndex.TryGetValue(sig.DedupKey, out var i))
+                // Indexers with the same parameter shape but different return types are distinct
+                // inherited interface slots. Merge accessors only when both shape and type match.
+                var key = $"{sig.TypeFq}:{sig.DedupKey}";
+                if (_indexerIndex.TryGetValue(key, out var i))
                 {
                     _indexers[i] = MergeIndexer(_indexers[i], sig);
                 }
                 else
                 {
-                    _indexerIndex[sig.DedupKey] = _indexers.Count;
+                    _indexerIndex[key] = _indexers.Count;
                     _indexers.Add(sig);
                 }
             }
