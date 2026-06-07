@@ -168,14 +168,17 @@ namespace NTypeForge.SourceGenerator
             // first: the generated unwrap branches test `TryUnbox<C>` (an `is C` check), which is
             // also true for subtypes of C, so a derived type must win its own branch ahead of its
             // base. Ties broken by fully-qualified name for deterministic output.
+            // The concrete order (most-derived first, name-tiebroken) is the same for every
+            // interface, so sort once and only re-filter per interface.
+            var sortedConcretes = concreteInfo.Values
+                .OrderByDescending(c => c.BaseDepth)
+                .ThenBy(c => c.Fq, StringComparer.Ordinal)
+                .ToList();
+
             var possibleMatches = new Dictionary<string, List<ConcreteInfo>>(StringComparer.Ordinal);
             foreach (var iface in interfaceInfo.Values.OrderBy(i => i.Fq, StringComparer.Ordinal))
             {
-                possibleMatches[iface.Fq] = concreteInfo.Values
-                    .OrderByDescending(c => c.BaseDepth)
-                    .ThenBy(c => c.Fq, StringComparer.Ordinal)
-                    .Where(c => ConcreteSatisfies(iface, c))
-                    .ToList();
+                possibleMatches[iface.Fq] = sortedConcretes.Where(c => ConcreteSatisfies(iface, c)).ToList();
             }
             return possibleMatches;
         }

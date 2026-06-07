@@ -85,11 +85,20 @@ namespace NTypeForge.SourceGenerator
             var underlyingType = GetUnderlyingType(argType);
             if (targetInterface.TypeKind != TypeKind.Interface || !IsProxyableKind(underlyingType)) return null;
 
+            // The instance already satisfies the interface nominally, so no proxy is needed: the
+            // runtime Duck<T> fallback's `instance is T` returns it directly. Generating a proxy here
+            // would only add a needless wrap/box.
+            if (AlreadyImplements(argType, targetInterface)) return null;
+
             return BuildModel(
                 invocation, target: argType, argType: argType, underlyingType: underlyingType,
                 interfaceType: targetInterface, argumentIndex: 0, isStatic: false, isDuckCall: true,
                 originalMethod: null, isUnambiguousDuckSite: true);
         }
+
+        private static bool AlreadyImplements(ITypeSymbol type, ITypeSymbol interfaceType)
+            => SymbolEqualityComparer.Default.Equals(type, interfaceType) ||
+               type.AllInterfaces.Any(i => SymbolEqualityComparer.Default.Equals(i, interfaceType));
 
         private static ExpressionSyntax? GetDuckInstanceExpression(InvocationExpressionSyntax invocation)
         {

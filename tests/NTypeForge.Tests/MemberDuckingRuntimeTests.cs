@@ -143,4 +143,21 @@ public class MemberDuckingRuntimeTests
         Assert.Equal(7, echo.Echo(7));
         Assert.Equal("hi", echo.Echo("hi"));
     }
+
+    public interface IAlready { int Val(); }
+
+    // A type that already nominally implements the interface needs no proxy.
+    public class AlreadyImpl : IAlready { public int Val() => 5; }
+
+    // Ducking a type that already implements the target interface returns the instance itself - no
+    // proxy is generated, so no wrap/box.
+    [Fact]
+    public void DuckingAnAlreadyImplementingType_ReturnsSameInstance()
+    {
+        var instance = new AlreadyImpl();
+
+        IAlready view = instance.Duck<IAlready>();
+
+        Assert.Same(instance, view);
+    }
 }

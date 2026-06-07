@@ -482,4 +482,52 @@ public class CodegenValidityTests
         Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
+
+    // Two distinct types in one namespace whose minimal names sanitize to the same identifier
+    // (`Foo<int>` -> `Foo_int_` and a class literally named `Foo_int_`) must not produce
+    // colliding proxy struct names (CS0101). The struct name is hash-disambiguated.
+    [Fact]
+    public void DistinctTypesSanitizingToSameName_DoNotCollide()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace N
+            {
+                public interface IBar { int Go(); }
+                public class Foo<T> { public int Go() => 0; }
+                public class Foo_int_ { public int Go() => 1; }
+                public class C { public void M() {
+                    var a = new Foo<int>().Duck<IBar>();
+                    var b = new Foo_int_().Duck<IBar>();
+                } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Two namespaces that sanitize to the same identifier (`A.B` and `A_B`) must not produce a
+    // duplicate generated-file hint name (which would crash the generator). Hints are
+    // hash-disambiguated.
+    [Fact]
+    public void NamespacesSanitizingToSameName_DoNotCollideInHints()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace A.B
+            {
+                public interface IBar { int Go(); }
+                public class Foo { public int Go() => 0; }
+                public class C { public void M() { var x = new Foo().Duck<IBar>(); } }
+            }
+            namespace A_B
+            {
+                public interface IBaz { int Go(); }
+                public class Qux { public int Go() => 0; }
+                public class D { public void N() { var y = new Qux().Duck<IBaz>(); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
 }
