@@ -18,6 +18,7 @@ namespace NTypeForge.SourceGenerator
                 p.RefKind,
                 p.Name,
                 p.IsOptional,
+                p.IsParams,
                 p.IsOptional ? DefaultValueSource(p) : null);
 
         public static MethodSig ToMethodSig(IMethodSymbol m)
@@ -121,7 +122,7 @@ namespace NTypeForge.SourceGenerator
             if (value == null) return "null";
             if (p.Type.TypeKind == TypeKind.Enum)
             {
-                return $"({SymbolNames.Fq(p.Type)}){Convert.ToInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)}";
+                return $"({SymbolNames.Fq(p.Type)}){EnumDefaultValue(value, (INamedTypeSymbol)p.Type)}";
             }
 
             switch (value)
@@ -165,5 +166,13 @@ namespace NTypeForge.SourceGenerator
                 _ when char.IsControl(value) => "\\u" + ((int)value).ToString("x4", CultureInfo.InvariantCulture),
                 _ => value.ToString()
             };
+
+        private static string EnumDefaultValue(object value, INamedTypeSymbol enumType)
+        {
+            var underlying = enumType.EnumUnderlyingType?.SpecialType;
+            return underlying == SpecialType.System_UInt64
+                ? Convert.ToUInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture)
+                : Convert.ToInt64(value, CultureInfo.InvariantCulture).ToString(CultureInfo.InvariantCulture);
+        }
     }
 }

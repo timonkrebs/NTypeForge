@@ -13,9 +13,12 @@ namespace NTypeForge.SourceGenerator
         public static IReadOnlyList<string> BuildSurfaceCompatKeys(ITypeSymbol type)
         {
             var result = new List<string>();
-            foreach (var member in type.GetMembers())
+            for (ITypeSymbol? current = type; current != null; current = current.BaseType)
             {
-                result.AddRange(SurfaceKeysForMember(member));
+                foreach (var member in current.GetMembers())
+                {
+                    result.AddRange(SurfaceKeysForMember(member));
+                }
             }
             return result.Distinct(StringComparer.Ordinal).ToList();
         }

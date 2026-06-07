@@ -83,6 +83,69 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
+    [Fact]
+    public void MethodArgumentDucking_WithOmittedParamsArgument_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ICalc c, params int[] values) => c.Add(1, 2) + values.Length;
+                    public void M() { var m = new Mgr(); m.H(new Adder()); m.H(new Adder(), 1, 2); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void MethodArgumentDucking_ForExtensionMethod_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Canvas { }
+                public static class CanvasExtensions
+                {
+                    public static int Draw(this Canvas c, ICalc calc) => calc.Add(1, 2);
+                }
+                public class C { public void M() { var canvas = new Canvas(); _ = canvas.Draw(new Adder()); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void OptionalUnsignedEnumDefault_DoesNotCrashGenerator()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public enum Big : ulong { Max = ulong.MaxValue }
+                public class Mgr
+                {
+                    public int H(ICalc c, Big value = Big.Max) => c.Add(1, 2);
+                    public void M() { var m = new Mgr(); m.H(new Adder()); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
     // Regression for the Sanitize fix: a two-type-argument generic underlying renders as
     // `Holder<int, string>`, whose comma/space previously leaked into the proxy's struct name and
     // produced ~40 parser errors. The strict sanitizer must yield a valid identifier.
@@ -222,6 +285,24 @@ public class CodegenValidityTests
                 public interface IDefault { int Value() => 1; }
                 public class Empty { }
                 public class C { public void M() { var x = new Empty().Duck<IDefault>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void InheritedConcreteMember_SatisfiesStructuralMatch()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class BaseAdder { public int Add(int a, int b) => a + b; }
+                public class DerivedAdder : BaseAdder { }
+                public class C { public void M() { var x = new DerivedAdder().Duck<ICalc>(); } }
             }
             """;
 

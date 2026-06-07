@@ -174,18 +174,46 @@ namespace NTypeForge.SourceGenerator
             var (candidate, paramIndex, syntaxIndex) = sites[0];
             var argType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[syntaxIndex].Expression).Type!;
             var underlyingType = GetUnderlyingType(argType);
-            if (!IsUsableFromGeneratedTopLevelCode(candidate.ContainingType!) ||
+            var target = GetForwardingTarget(invocation, semanticModel, candidate);
+            if (target == null ||
+                !IsUsableFromGeneratedTopLevelCode(candidate.ContainingType!) ||
+                !IsUsableFromGeneratedTopLevelCode(target) ||
                 !IsUsableFromGeneratedTopLevelCode(argType) ||
                 !IsUsableFromGeneratedTopLevelCode(underlyingType) ||
                 !IsUsableFromGeneratedTopLevelCode(candidate.Parameters[paramIndex].Type))
                 return null;
 
             return BuildModel(
-                invocation, target: candidate.ContainingType!, argType: argType,
+                invocation, target: target, argType: argType,
                 underlyingType: underlyingType, interfaceType: candidate.Parameters[paramIndex].Type,
-                argumentIndex: paramIndex, isStatic: candidate.IsStatic, isDuckCall: false,
+                argumentIndex: EmittedParameterIndex(candidate, paramIndex),
+                isStatic: candidate.IsStatic && !IsExtensionLike(candidate),
+                isDuckCall: false,
                 originalMethod: candidate);
         }
+
+        private static bool IsExtensionLike(IMethodSymbol method)
+            => method.IsExtensionMethod || method.ReducedFrom != null;
+
+        private static bool HasExplicitExtensionReceiverParameter(IMethodSymbol method)
+            => method.IsExtensionMethod && method.ReducedFrom == null;
+
+        private static IMethodSymbol OriginalExtensionDefinition(IMethodSymbol method)
+            => method.ReducedFrom ?? method;
+
+        private static ITypeSymbol? GetForwardingTarget(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, IMethodSymbol candidate)
+        {
+            if (candidate.ReducedFrom != null && invocation.Expression is MemberAccessExpressionSyntax memberAccess)
+                return semanticModel.GetTypeInfo(memberAccess.Expression).Type;
+
+            return HasExplicitExtensionReceiverParameter(candidate) && candidate.Parameters.Length > 0
+                ? candidate.Parameters[0].Type
+                : candidate.ContainingType;
+        }
+
+        private static int EmittedParameterIndex(IMethodSymbol candidate, int paramIndex)
+            => HasExplicitExtensionReceiverParameter(candidate) ? paramIndex - 1 : paramIndex;
 
         // Collapses (overload, argument) sites that would generate the same forwarding method - an
         // override and the base it hides, or a symbol Roslyn lists more than once - so they don't
@@ -252,7 +280,7 @@ namespace NTypeForge.SourceGenerator
             var argType = semanticModel.GetTypeInfo(arg.Expression).Type;
             var paramType = candidate.Parameters[paramIndex].Type;
 
-            if (argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
+            if (paramIndex < 0 || argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
 
             var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
             if (conversion.Exists && conversion.IsImplicit) return false;
@@ -265,34 +293,60 @@ namespace NTypeForge.SourceGenerator
         {
             parameterIndices = new List<int>(arguments.Count);
             var used = new HashSet<int>();
-            int nextPositional = 0;
+            int firstCallableParameter = HasExplicitExtensionReceiverParameter(candidate) ? 1 : 0;
+            int nextPositional = firstCallableParameter;
 
             foreach (var arg in arguments)
             {
-                int paramIndex;
-                if (arg.NameColon != null)
-                {
-                    var name = arg.NameColon.Name.Identifier.ValueText;
-                    paramIndex = FindParameter(candidate, name);
-                    if (paramIndex < 0 || used.Contains(paramIndex)) return false;
-                }
-                else
-                {
-                    while (nextPositional < candidate.Parameters.Length && used.Contains(nextPositional))
-                        nextPositional++;
-                    if (nextPositional >= candidate.Parameters.Length) return false;
-                    paramIndex = nextPositional++;
-                }
+                if (!TryMapArgument(arg, candidate, used, ref nextPositional, out var paramIndex)) return false;
 
                 parameterIndices.Add(paramIndex);
-                used.Add(paramIndex);
+                if (!candidate.Parameters[paramIndex].IsParams) used.Add(paramIndex);
             }
 
-            for (int i = 0; i < candidate.Parameters.Length; i++)
+            return AllRequiredParametersUsed(candidate, used, firstCallableParameter);
+        }
+
+        private static bool TryMapArgument(
+            ArgumentSyntax arg, IMethodSymbol candidate, HashSet<int> used, ref int nextPositional, out int paramIndex)
+        {
+            return arg.NameColon != null
+                ? TryMapNamedArgument(arg, candidate, used, out paramIndex)
+                : TryMapPositionalArgument(candidate, used, ref nextPositional, out paramIndex);
+        }
+
+        private static bool TryMapNamedArgument(
+            ArgumentSyntax arg, IMethodSymbol candidate, HashSet<int> used, out int paramIndex)
+        {
+            var name = arg.NameColon!.Name.Identifier.ValueText;
+            paramIndex = FindParameter(candidate, name);
+            return paramIndex >= 0 && !used.Contains(paramIndex);
+        }
+
+        private static bool TryMapPositionalArgument(
+            IMethodSymbol candidate, HashSet<int> used, ref int nextPositional, out int paramIndex)
+        {
+            while (nextPositional < candidate.Parameters.Length && used.Contains(nextPositional))
+                nextPositional++;
+
+            if (nextPositional < candidate.Parameters.Length)
             {
-                if (!used.Contains(i) && !candidate.Parameters[i].IsOptional) return false;
+                paramIndex = nextPositional;
+                if (!candidate.Parameters[paramIndex].IsParams) nextPositional++;
+                return true;
             }
 
+            paramIndex = candidate.Parameters.Length - 1;
+            return paramIndex >= 0 && candidate.Parameters[paramIndex].IsParams;
+        }
+
+        private static bool AllRequiredParametersUsed(IMethodSymbol candidate, HashSet<int> used, int firstCallableParameter)
+        {
+            for (int i = firstCallableParameter; i < candidate.Parameters.Length; i++)
+            {
+                if (!used.Contains(i) && !candidate.Parameters[i].IsOptional && !candidate.Parameters[i].IsParams)
+                    return false;
+            }
             return true;
         }
 
@@ -326,9 +380,10 @@ namespace NTypeForge.SourceGenerator
 
             var originalParams = originalMethod == null
                 ? (IReadOnlyList<ParamSig>)Array.Empty<ParamSig>()
-                : originalMethod.Parameters.Select(MemberSignatures.ToParamSig).ToList();
+                : ForwardedParameters(originalMethod).Select(MemberSignatures.ToParamSig).ToList();
 
             var loc = invocation.GetLocation();
+            var originalDefinition = originalMethod == null ? null : OriginalExtensionDefinition(originalMethod);
 
             return new CandidateModel(
                 targetFq: SymbolNames.Fq(target),
@@ -348,6 +403,8 @@ namespace NTypeForge.SourceGenerator
                 isStatic: isStatic,
                 isDuckCall: isDuckCall,
                 originalMethodName: originalMethod?.Name ?? "",
+                originalContainingTypeFq: originalDefinition?.ContainingType == null ? "" : SymbolNames.Fq(originalDefinition.ContainingType),
+                originalIsExtensionMethod: originalMethod != null && IsExtensionLike(originalMethod),
                 originalReturnTypeFq: originalMethod == null ? "" : SymbolNames.Fq(originalMethod.ReturnType),
                 originalReturnsVoid: originalMethod != null && originalMethod.ReturnType.SpecialType == SpecialType.System_Void,
                 originalParameters: originalParams,
@@ -362,5 +419,8 @@ namespace NTypeForge.SourceGenerator
                 diagSpan: loc.SourceSpan,
                 diagLineSpan: loc.GetLineSpan().Span);
         }
+
+        private static IEnumerable<IParameterSymbol> ForwardedParameters(IMethodSymbol method)
+            => HasExplicitExtensionReceiverParameter(method) ? method.Parameters.Skip(1) : method.Parameters;
     }
 }

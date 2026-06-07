@@ -42,6 +42,8 @@ namespace NTypeForge.SourceGenerator.Models
         // The original (failing) method whose duck-typed parameter we forward through a proxy.
         // Unused for Duck<T> calls.
         public string OriginalMethodName { get; }
+        public string OriginalContainingTypeFq { get; }
+        public bool OriginalIsExtensionMethod { get; }
         public string OriginalReturnTypeFq { get; }
         public bool OriginalReturnsVoid { get; }
         public IReadOnlyList<ParamSig> OriginalParameters { get; }
@@ -77,7 +79,8 @@ namespace NTypeForge.SourceGenerator.Models
             string underlyingFq, string underlyingNamespace, string underlyingMinimalName, bool underlyingIsInterface, int underlyingBaseDepth,
             string interfaceFq, string interfaceMinimalName,
             int argumentIndex, bool isStatic, bool isDuckCall,
-            string originalMethodName, string originalReturnTypeFq, bool originalReturnsVoid, IReadOnlyList<ParamSig> originalParameters,
+            string originalMethodName, string originalContainingTypeFq, bool originalIsExtensionMethod,
+            string originalReturnTypeFq, bool originalReturnsVoid, IReadOnlyList<ParamSig> originalParameters,
             IReadOnlyList<MethodSig> methodRequirements,
             IReadOnlyList<PropertySig> propertyRequirements,
             IReadOnlyList<IndexerSig> indexerRequirements,
@@ -103,6 +106,8 @@ namespace NTypeForge.SourceGenerator.Models
             IsStatic = isStatic;
             IsDuckCall = isDuckCall;
             OriginalMethodName = originalMethodName;
+            OriginalContainingTypeFq = originalContainingTypeFq;
+            OriginalIsExtensionMethod = originalIsExtensionMethod;
             OriginalReturnTypeFq = originalReturnTypeFq;
             OriginalReturnsVoid = originalReturnsVoid;
             OriginalParameters = originalParameters;
@@ -131,7 +136,8 @@ namespace NTypeForge.SourceGenerator.Models
                 TargetFq, TargetIsInterface, ArgumentFq, ArgumentIsInterface,
                 UnderlyingFq, UnderlyingIsInterface, UnderlyingBaseDepth,
                 InterfaceFq, ArgumentIndex, IsStatic, IsDuckCall,
-                OriginalMethodName, OriginalReturnTypeFq, OriginalReturnsVoid, prms,
+                OriginalMethodName, OriginalContainingTypeFq, OriginalIsExtensionMethod,
+                OriginalReturnTypeFq, OriginalReturnsVoid, prms,
                 reqs, props, idxs, evts, surface, IsSelfMatch, UnsupportedMemberName ?? "",
                 DiagFilePath ?? "", DiagSpan.Start, DiagSpan.Length);
         }

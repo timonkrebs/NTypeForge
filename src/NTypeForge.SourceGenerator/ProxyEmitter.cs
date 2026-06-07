@@ -221,7 +221,6 @@ namespace NTypeForge.SourceGenerator
             var argIndex = candidate.ArgumentIndex;
             var parameters = candidate.OriginalParameters;
             var argName = SymbolNames.Escape(parameters[argIndex].Name);
-            var callReceiver = candidate.IsStatic ? targetFullName : receiver;
             var methodName = SymbolNames.Escape(candidate.OriginalMethodName);
 
             // The forwarding call's argument list, with the duck-typed argument replaced by
@@ -230,7 +229,7 @@ namespace NTypeForge.SourceGenerator
                 idx == argIndex ? argReplacement : $"{RefArgumentPrefix(p.RefKind)}{SymbolNames.Escape(p.Name)}"));
 
             var methodParams = string.Join(", ", parameters.Select((p, idx) =>
-                $"{RefPrefix(p.RefKind)}{(idx == argIndex ? candidate.ArgumentFq : p.TypeFq)} {SymbolNames.Escape(p.Name)}{DefaultSuffix(p)}"));
+                $"{ParamsPrefix(p)}{RefPrefix(p.RefKind)}{(idx == argIndex ? candidate.ArgumentFq : p.TypeFq)} {SymbolNames.Escape(p.Name)}{DefaultSuffix(p)}"));
 
             var methodSig = $"{methodName}({methodParams})";
             if (!generatedMethods.Add(methodSig)) return;
@@ -243,18 +242,18 @@ namespace NTypeForge.SourceGenerator
             sb.AppendLine($"            public {isStatic}{candidate.OriginalReturnTypeFq} {methodName}({methodParams})");
             sb.AppendLine("            {");
 
-            EmitForwardingUnwrapBranches(sb, candidate, argName, callReceiver, methodName, CallArgs, localPrefix);
+            EmitForwardingUnwrapBranches(sb, candidate, argName, targetFullName, receiver, methodName, CallArgs, localPrefix);
 
             // Direct wrap fallback; see the note in EmitDuckMethod for the cross-assembly
             // double-wrap boundary (recoverable via TryUnbox/Unbox).
             var directProxy = ProxyFullName(candidate.UnderlyingNamespace, candidate.UnderlyingMinimalName, candidate.UnderlyingFq, candidate.InterfaceMinimalName, candidate.InterfaceFq);
-            var directCall = $"{callReceiver}.{methodName}({CallArgs($"new {directProxy}(({candidate.UnderlyingFq}){argName})")})";
+            var directCall = OriginalCall(candidate, targetFullName, receiver, methodName, CallArgs($"new {directProxy}(({candidate.UnderlyingFq}){argName})"));
             sb.AppendLine($"                {ReturnStatement(candidate.OriginalReturnsVoid, directCall)}");
             sb.AppendLine("            }");
         }
 
         private void EmitForwardingUnwrapBranches(
-            StringBuilder sb, CandidateModel candidate, string argName, string receiver, string methodName,
+            StringBuilder sb, CandidateModel candidate, string argName, string targetFullName, string receiver, string methodName,
             Func<string, string> callArgs, string localPrefix)
         {
             // Unwrap branches only make sense when the incoming value can actually be a proxy, i.e.
@@ -268,11 +267,23 @@ namespace NTypeForge.SourceGenerator
             {
                 var local = $"{localPrefix}{ui++}";
                 var proxy = ProxyFullName(m.Namespace, m.MinimalName, m.Fq, candidate.InterfaceMinimalName, candidate.InterfaceFq);
-                var call = $"{receiver}.{methodName}({callArgs($"new {proxy}({local})")})";
+                var call = OriginalCall(candidate, targetFullName, receiver, methodName, callArgs($"new {proxy}({local})"));
                 sb.AppendLine($"                if ({argName}.TryUnbox<{m.Fq}>(out var {local})) {{");
                 sb.AppendLine($"                    {(candidate.OriginalReturnsVoid ? $"{call}; return;" : $"return {call};")}");
                 sb.AppendLine("                }");
             }
+        }
+
+        private static string OriginalCall(
+            CandidateModel candidate, string targetFullName, string receiver, string methodName, string args)
+        {
+            if (candidate.OriginalIsExtensionMethod)
+            {
+                return $"{candidate.OriginalContainingTypeFq}.{methodName}({receiver}, {args})";
+            }
+
+            var callReceiver = candidate.IsStatic ? targetFullName : receiver;
+            return $"{callReceiver}.{methodName}({args})";
         }
 
         private static void GenerateProxy(StringBuilder sb, ProxyDecl proxy)
@@ -317,7 +328,7 @@ namespace NTypeForge.SourceGenerator
         {
             var name = SymbolNames.Escape(method.Name);
             var typeParams = method.Arity > 0 ? $"<{string.Join(", ", method.TypeParameters)}>" : "";
-            var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {SymbolNames.Escape(p.Name)}"));
+            var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{ParamsPrefix(p)}{RefPrefix(p.RefKind)}{p.TypeFq} {SymbolNames.Escape(p.Name)}"));
             var argsStr = string.Join(", ", method.Parameters.Select(p => $"{RefArgumentPrefix(p.RefKind)}{SymbolNames.Escape(p.Name)}"));
 
             sb.AppendLine($"        public {method.ReturnTypeFq} {name}{typeParams}({parametersStr})");
@@ -400,6 +411,9 @@ namespace NTypeForge.SourceGenerator
 
         private static string DefaultSuffix(ParamSig parameter)
             => parameter.IsOptional ? $" = {parameter.DefaultValueSource ?? "default"}" : "";
+
+        private static string ParamsPrefix(ParamSig parameter)
+            => parameter.IsParams ? "params " : "";
 
         // A generated identifier (e.g. the extension receiver) that does not collide with any
         // user-derived name in `taken`; prepends `_` until unique. Normally returns `desired`.
