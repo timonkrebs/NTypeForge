@@ -329,6 +329,50 @@ public class DiagnosticTests
 
         Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF003"));
     }
+    
+    // Even when both overloads target *proxyable* interfaces, an ambiguous duckable call must not be
+    // silently rewired: choosing one interpretation would be arbitrary (and could pick the wrong
+    // overload). The generator emits no proxy, so the compiler's own ambiguity error stands.
+    [Fact]
+    public void AmbiguousMethodArgumentDuck_IsNotRewired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IA { int Do(); }
+                public interface IB { int Do(); }
+                public class Impl { public int Do() => 1; }
+                public class Mgr
+                {
+                    public void H(IA a) {}
+                    public void H(IB b) {}
+                    public void M() { new Mgr().H(new Impl()); }
+                }
+            }
+            """;
+
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+    }
+
+    // A static-qualified `DuckExtensions.Duck<T>(x)` cannot bind to the generated instance extension
+    // member, so it is not a duck site. The analyzer must not mistake the `DuckExtensions` type for
+    // the ducked instance and report a spurious NTF001 against it.
+    [Fact]
+    public void QualifiedStaticDuckCall_DoesNotReportNTF001()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class C { public void M() { var x = DuckExtensions.Duck<ICalc>(new Adder()); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+    }
 
     // A static member with a default implementation is provided by the interface itself, so it is
     // not "unsupported" and a concrete that matches the instance contract ducks cleanly.

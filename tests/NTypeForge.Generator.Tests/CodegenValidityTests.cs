@@ -641,4 +641,82 @@ public class CodegenValidityTests
         Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
+
+    // Regression: a struct underlying with a settable property forwards `__ntf_instance.X = value`.
+    // While the proxy was a `readonly struct` (and the field readonly) that was CS1648 - assigning to
+    // a member of a readonly value-type field. The proxy is now a class with a mutable field.
+    [Fact]
+    public void StructUnderlyingSettableProperty_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IHasValue { int Value { get; set; } }
+                public struct Box { public int Value { get; set; } }
+                public class C { public void M(IHasValue v) {} public void Run() { new C().M(new Box()); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Same root cause as the settable property: a struct underlying's `__ntf_instance[i] = value`
+    // was CS1648 against the readonly value-type field.
+    [Fact]
+    public void StructUnderlyingSettableIndexer_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IBag { int this[int i] { get; set; } }
+                public struct Bag { public int this[int i] { get => 0; set {} } }
+                public class C { public void M(IBag v) {} public void Run() { new C().M(new Bag()); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A struct underlying with an event forwards `__ntf_instance.E += value`, which mutates the
+    // value-type field; the class proxy with a mutable field keeps that legal and effective.
+    [Fact]
+    public void StructUnderlyingEvent_EmitsCompilableCode()
+    {
+        const string source = """
+            using System;
+            using NTypeForge;
+            namespace T
+            {
+                public interface IRinger { event Action Rung; }
+                public struct Bell { public event Action Rung; }
+                public class C { public void M(IRinger v) {} public void Run() { new C().M(new Bell()); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A `ref struct` can't back a proxy (it can't be a field of the proxy class, a type argument to
+    // IProxy<T>, or cast to object). The generator must leave the site alone - emitting nothing
+    // rather than uncompilable code - so the compiler's own overload-resolution error is all the user
+    // sees. Asserting *no NTF emitted code* by checking the generated output stays empty of a proxy.
+    [Fact]
+    public void RefStructUnderlying_IsNotProxied()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IGo { void Go(); }
+                public ref struct Runner { public void Go() {} }
+                public class C { public void M(IGo g) {} public void Run() { new C().M(new Runner()); } }
+            }
+            """;
+
+        // The generator emits nothing for the site, so there are no generated proxy/extension files
+        // (only the original, already-failing call remains - not our concern here).
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+    }
 }

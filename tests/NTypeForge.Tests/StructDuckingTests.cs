@@ -69,4 +69,43 @@ public class StructDuckingTests
         Assert.Equal(6, svc.Run(new PlusStruct(1), 2, 3));    // 1 + 2 + 3
         Assert.Equal(50, svc.Run(new TimesStruct(10), 2, 3)); // 10 * (2 + 3)
     }
+
+    [Fact]
+    public void StructProxyKeepsMutationsForItsLifetime()
+    {
+        // The proxy wraps a *copy* of the struct (value semantics), so mutations never reach `c`.
+        // But within the proxy's own lifetime, state must stay consistent: while the proxy was a
+        // readonly struct, every mutating call hit a fresh defensive copy and `Value` stayed 0.
+        var c = new MutCounter();
+        ICounter ducked = c.Duck<ICounter>();
+
+        ducked.Inc();
+        ducked.Inc();
+
+        Assert.Equal(2, ducked.Value);
+        Assert.Equal(0, c.Value); // the original struct is untouched - documented value-copy behavior
+    }
+
+    [Fact]
+    public void StructProxySettablePropertyRoundTrips()
+    {
+        var box = new ValueBox();
+        IValueBox ducked = box.Duck<IValueBox>();
+
+        ducked.Value = 42;
+
+        Assert.Equal(42, ducked.Value);
+    }
 }
+
+public interface ICounter { int Value { get; } void Inc(); }
+
+public struct MutCounter
+{
+    public int Value { get; private set; }
+    public void Inc() => Value++;
+}
+
+public interface IValueBox { int Value { get; set; } }
+
+public struct ValueBox { public int Value { get; set; } }

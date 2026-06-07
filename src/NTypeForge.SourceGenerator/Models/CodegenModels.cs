@@ -44,7 +44,7 @@ namespace NTypeForge.SourceGenerator.Models
         public HashSet<string> SurfaceKeys = new HashSet<string>(StringComparer.Ordinal);
     }
 
-    // One proxy struct to emit: an underlying type adapted to an interface, plus the members to
+    // One proxy to emit: an underlying type adapted to an interface, plus the members to
     // forward.
     internal readonly struct ProxyDecl
     {

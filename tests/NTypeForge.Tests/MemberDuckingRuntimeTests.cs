@@ -66,7 +66,7 @@ public class MemberDuckingRuntimeTests
 
     public class Bell
     {
-        public event Action Rung;
+        public event Action? Rung;
         public void Ring() => Rung?.Invoke();
     }
 

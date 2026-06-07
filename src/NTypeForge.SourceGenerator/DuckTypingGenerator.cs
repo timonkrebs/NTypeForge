@@ -110,9 +110,10 @@ namespace NTypeForge.SourceGenerator
 
         // An interface member NTypeForge can't proxy was found. An explicit Duck<T> is always a hard
         // NTF002 error. An implicit method-argument duck only earns a warning, and only at a
-        // high-confidence site: exactly one duckable interpretation (IsUnambiguousDuckSite) whose
-        // argument already satisfies every proxyable member (IsSelfMatch over a non-empty instance
-        // contract). That excludes failed calls that merely happen to have an interface overload.
+        // high-confidence site whose argument already satisfies every proxyable member (IsSelfMatch
+        // over a non-empty instance contract). Ambiguous sites never reach here: CandidateAnalyzer
+        // drops a failed call with more than one duckable interpretation, so any model built for an
+        // implicit duck is already the unique interpretation of its call.
         private static void ReportUnsupported(SourceProductionContext context, CandidateModel candidate)
         {
             if (candidate.IsDuckCall)
@@ -121,7 +122,7 @@ namespace NTypeForge.SourceGenerator
                     UnsupportedInterfaceMember, candidate.ToLocation(),
                     candidate.InterfaceFq, candidate.UnsupportedMemberName));
             }
-            else if (candidate.IsUnambiguousDuckSite && candidate.IsSelfMatch && HasInstanceRequirements(candidate))
+            else if (candidate.IsSelfMatch && HasInstanceRequirements(candidate))
             {
                 context.ReportDiagnostic(Diagnostic.Create(
                     UnbridgeableImplicitDuck, candidate.ToLocation(),

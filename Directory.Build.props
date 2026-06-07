@@ -22,10 +22,14 @@
 
   <PropertyGroup>
     <MeasureCognitiveComplexity Condition="'$(MeasureCognitiveComplexity)' == ''">false</MeasureCognitiveComplexity>
+    <!-- A clean build must stay warning-free. CI relies on this to surface regressions. -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
   <ItemGroup Condition="'$(MeasureCognitiveComplexity)' == 'true'">
-    <PackageReference Include="SonarAnalyzer.CSharp" Version="*">
+    <!-- Pinned, not `*`: a floating analyzer version can change S3776 scoring and break CI with no
+         code change. Bump deliberately. -->
+    <PackageReference Include="SonarAnalyzer.CSharp" Version="10.27.0.140913">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>

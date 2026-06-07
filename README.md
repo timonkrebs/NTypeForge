@@ -282,12 +282,14 @@ change any duck-typing site skip regeneration.
 
 NTypeForge avoids the usual cost of dynamic duck typing — **no reflection, no
 `DynamicObject`, no expression-tree compilation, no per-call dispatch setup.** A
-forwarding call is a direct method call through a one-field struct.
+forwarding call is a direct method call through a one-field proxy.
 
-It is **not** strictly zero-allocation, though. The proxy is a `struct`, but the
-moment it's passed where the target interface is expected, it gets **boxed once**
-(a single small heap allocation per call). The win is structural: you pay one box,
-not a reflection pipeline — and you keep full compile-time type checking.
+It is **not** zero-allocation, though. The proxy is a small `class`, so it costs
+**one heap allocation per call** (the wrapped instance plus a header). The win is
+structural: you pay one tiny object, not a reflection pipeline — and you keep full
+compile-time type checking. (An earlier design used a `struct` proxy, but it was
+boxed the instant it was passed as the interface — so it allocated anyway, while
+making a *struct* underlying impossible to proxy correctly.)
 
 ## Compile-time implications
 
@@ -342,12 +344,19 @@ cost of binding that output on a rebuild.
 - **Directly-declared members.** Matching considers a type's own declared members;
   members it inherits from a base *class* are not counted toward the match.
 - **`static abstract` interface members are unsupported.** A proxy is an instance
-  struct and can't implement a static member that has no default implementation.
+  object and can't implement a static member that has no default implementation.
   Such an interface can't be proxied (a `static` member *with* a default
   implementation is fine — it's supplied by the interface itself).
 - **`init`-only underlying members are effectively read-only.** A proxy wraps an
   already-constructed instance, so it can satisfy a settable interface requirement
   only when the underlying setter is a regular `set`.
+- **`struct` underlyings are wrapped by value.** A proxy over a struct holds a
+  *copy* of it, so mutations made through the proxy are visible on the proxy but do
+  **not** propagate back to the original variable (ordinary C# value semantics).
+  State stays consistent for the proxy's own lifetime.
+- **`ref struct` underlyings are not supported.** A `ref struct` can't be wrapped by
+  the proxy (it can't be a field of the proxy, a type argument, or boxed), so such a
+  site is left alone and the compiler's own error stands.
 
 When `Duck<T>()` targets an interface with an unsupported member it reports
 [NTF002](#diagnostics). An implicit (non-`Duck`) call is left as the original

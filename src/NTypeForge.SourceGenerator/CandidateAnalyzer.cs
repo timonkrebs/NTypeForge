@@ -37,9 +37,13 @@ namespace NTypeForge.SourceGenerator
         private static bool IsTopLevelNTypeForgeNamespace(INamespaceSymbol? ns)
             => ns != null && ns.Name == "NTypeForge" && (ns.ContainingNamespace == null || ns.ContainingNamespace.IsGlobalNamespace);
 
-        // The underlying type kinds NTypeForge can build a proxy around.
+        // The underlying type kinds NTypeForge can build a proxy around. A `ref struct` is excluded:
+        // it can't be a field of the (non-ref) proxy class, can't be a type argument to IProxy<T>, and
+        // can't be cast to object - so proxying it would only emit code that fails to compile. Leaving
+        // such a site alone lets the compiler's own (correct) error stand.
         private static bool IsProxyableKind(ITypeSymbol type)
-            => type.TypeKind == TypeKind.Class || type.TypeKind == TypeKind.Struct || type.TypeKind == TypeKind.Interface;
+            => !type.IsRefLikeType &&
+               (type.TypeKind == TypeKind.Class || type.TypeKind == TypeKind.Struct || type.TypeKind == TypeKind.Interface);
 
         private static ITypeSymbol GetUnderlyingType(ITypeSymbol type)
         {
@@ -67,7 +71,8 @@ namespace NTypeForge.SourceGenerator
             return type;
         }
 
-        // An explicit `instance.Duck<T>()` (or `Duck<T>(instance)`) call.
+        // An explicit `instance.Duck<T>()` call (the member-access form is the only one the generated
+        // instance extension member can intercept; see GetDuckInstanceExpression).
         private static CandidateModel? TryGetDuckCall(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
         {
@@ -75,7 +80,7 @@ namespace NTypeForge.SourceGenerator
                 !IsTopLevelNTypeForgeNamespace(resolved.ContainingNamespace) || resolved.TypeArguments.Length != 1)
                 return null;
 
-            var instanceExpr = GetDuckInstanceExpression(invocation);
+            var instanceExpr = GetDuckInstanceExpression(invocation, semanticModel);
             if (instanceExpr == null) return null;
 
             var argType = semanticModel.GetTypeInfo(instanceExpr).Type;
@@ -93,7 +98,7 @@ namespace NTypeForge.SourceGenerator
             return BuildModel(
                 invocation, target: argType, argType: argType, underlyingType: underlyingType,
                 interfaceType: targetInterface, argumentIndex: 0, isStatic: false, isDuckCall: true,
-                originalMethod: null, isUnambiguousDuckSite: true);
+                originalMethod: null);
         }
 
         private static bool AlreadyImplements(SemanticModel semanticModel, ITypeSymbol type, ITypeSymbol interfaceType)
@@ -105,22 +110,32 @@ namespace NTypeForge.SourceGenerator
             return conversion.IsIdentity || (conversion.IsImplicit && conversion.IsReference);
         }
 
-        private static ExpressionSyntax? GetDuckInstanceExpression(InvocationExpressionSyntax invocation)
+        // The ducked instance in `x.Duck<T>()`. Only the member-access form whose receiver is a
+        // *value* is a real duck site. A static-qualified `DuckExtensions.Duck<T>(x)` has the library
+        // type as its receiver and can never bind to the generated instance extension member, so
+        // treating it as a site would only emit a spurious NTF001 against `DuckExtensions` itself -
+        // we leave it to the runtime fallback instead.
+        private static ExpressionSyntax? GetDuckInstanceExpression(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel)
         {
-            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess) return memberAccess.Expression;
-            if (invocation.ArgumentList.Arguments.Count == 1) return invocation.ArgumentList.Arguments[0].Expression;
-            return null;
+            if (!(invocation.Expression is MemberAccessExpressionSyntax memberAccess)) return null;
+
+            var receiver = semanticModel.GetSymbolInfo(memberAccess.Expression).Symbol;
+            if (receiver is ITypeSymbol || receiver is INamespaceSymbol) return null;
+
+            return memberAccess.Expression;
         }
 
         // A failed call whose argument could implicitly become an interface parameter via a proxy.
-        // All duckable (overload, argument) sites are collected so we can tell whether the call has
-        // exactly one such interpretation: that "unambiguous" flag gates the NTF003 near-miss
-        // warning, keeping it off failed calls that merely happen to have an interface overload.
+        // We rewire only when the call has exactly one duckable interpretation. With more than one,
+        // silently choosing a single (overload, argument) would be non-deterministic and could bind
+        // the call to the wrong overload, so we leave the original (still-failing) call for the
+        // compiler to report - which is also what suppresses the NTF003 near-miss on ambiguous sites.
         private static CandidateModel? TryGetMethodArgumentDuck(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
         {
-            var sites = CollectDuckableArgumentSites(invocation, semanticModel, symbolInfo);
-            if (sites.Count == 0) return null;
+            var sites = DistinctInterpretations(CollectDuckableArgumentSites(invocation, semanticModel, symbolInfo));
+            if (sites.Count != 1) return null;
 
             var (candidate, argIndex) = sites[0];
             var argType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[argIndex].Expression).Type!;
@@ -128,7 +143,34 @@ namespace NTypeForge.SourceGenerator
                 invocation, target: candidate.ContainingType!, argType: argType,
                 underlyingType: GetUnderlyingType(argType), interfaceType: candidate.Parameters[argIndex].Type,
                 argumentIndex: argIndex, isStatic: candidate.IsStatic, isDuckCall: false,
-                originalMethod: candidate, isUnambiguousDuckSite: sites.Count == 1);
+                originalMethod: candidate);
+        }
+
+        // Collapses (overload, argument) sites that would generate the same forwarding method - an
+        // override and the base it hides, or a symbol Roslyn lists more than once - so they don't
+        // count as a false ambiguity. Genuinely distinct interpretations (different target interface
+        // or different remaining parameters) survive as separate entries.
+        private static List<(IMethodSymbol Candidate, int ArgIndex)> DistinctInterpretations(
+            List<(IMethodSymbol Candidate, int ArgIndex)> sites)
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var result = new List<(IMethodSymbol, int)>();
+            foreach (var site in sites)
+            {
+                if (seen.Add(InterpretationKey(site.Candidate, site.ArgIndex))) result.Add(site);
+            }
+            return result;
+        }
+
+        // Identifies the forwarding method an interpretation would emit: the (static-ness, name,
+        // ducked-argument position, target interface, remaining parameter shape). Equal keys are
+        // interchangeable; differing keys are a real ambiguity the user must resolve.
+        private static string InterpretationKey(IMethodSymbol candidate, int argIndex)
+        {
+            var shape = string.Join(",", candidate.Parameters.Select((p, i) =>
+                i == argIndex ? "DUCK" : $"{p.RefKind}:{SymbolNames.Fq(p.Type)}"));
+            return $"{(candidate.IsStatic ? "s" : "i")}|{candidate.Name}|{argIndex}|" +
+                   $"{SymbolNames.Fq(candidate.Parameters[argIndex].Type)}|{shape}";
         }
 
         private static List<(IMethodSymbol Candidate, int ArgIndex)> CollectDuckableArgumentSites(
@@ -180,8 +222,7 @@ namespace NTypeForge.SourceGenerator
             int argumentIndex,
             bool isStatic,
             bool isDuckCall,
-            IMethodSymbol? originalMethod,
-            bool isUnambiguousDuckSite)
+            IMethodSymbol? originalMethod)
         {
             var requirements = InterfaceRequirementsAnalyzer.Analyze(interfaceType);
 
@@ -225,7 +266,6 @@ namespace NTypeForge.SourceGenerator
                 underlyingSurfaceCompatKeys: surface,
                 isSelfMatch: isSelfMatch,
                 unsupportedMemberName: requirements.Unsupported,
-                isUnambiguousDuckSite: isUnambiguousDuckSite,
                 diagFilePath: loc.SourceTree?.FilePath,
                 diagSpan: loc.SourceSpan,
                 diagLineSpan: loc.GetLineSpan().Span);

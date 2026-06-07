@@ -7,7 +7,7 @@ using NTypeForge.SourceGenerator.Models;
 
 namespace NTypeForge.SourceGenerator
 {
-    // Output stage (symbol-free): renders proxy structs and the per-target extension class from the
+    // Output stage (symbol-free): renders proxy classes and the per-target extension class from the
     // equatable models. The match map and interface requirements are held as fields so the many
     // emit helpers don't have to thread them through every call.
     internal sealed class ProxyEmitter
@@ -77,7 +77,7 @@ namespace NTypeForge.SourceGenerator
                 sb.AppendLine("{");
                 foreach (var proxy in kvp.Value.OrderBy(x => x.UnderlyingFq + "|" + x.InterfaceFq, StringComparer.Ordinal))
                 {
-                    GenerateProxyStruct(sb, proxy);
+                    GenerateProxy(sb, proxy);
                 }
                 sb.AppendLine("}");
                 // Hash-suffix the hint: two namespaces can sanitize to the same identifier (e.g.
@@ -275,15 +275,23 @@ namespace NTypeForge.SourceGenerator
             }
         }
 
-        private static void GenerateProxyStruct(StringBuilder sb, ProxyDecl proxy)
+        private static void GenerateProxy(StringBuilder sb, ProxyDecl proxy)
         {
             var structName = GetProxyStructName(proxy.UnderlyingMinimalName, proxy.UnderlyingFq, proxy.InterfaceMinimalName, proxy.InterfaceFq);
             var interfaceFullName = proxy.InterfaceFq;
             var underlyingFullName = proxy.UnderlyingFq;
 
-            sb.AppendLine($"    internal readonly struct {structName} : {interfaceFullName}, IProxy<{underlyingFullName}>");
+            // A `class`, not a `readonly struct`. A struct proxy is boxed the instant it's passed as
+            // the interface, so it allocates anyway - while making a struct *underlying* impossible to
+            // proxy correctly: a settable property/indexer would emit `__ntf_instance.X = value`
+            // against a readonly value-type field (CS1648), and every mutating call would hit a fresh
+            // defensive copy, silently losing state. A class with a mutable field allocates the same
+            // (one object per call) and keeps the wrapped instance consistent for its whole lifetime.
+            sb.AppendLine($"    internal sealed class {structName} : {interfaceFullName}, IProxy<{underlyingFullName}>");
             sb.AppendLine("    {");
-            sb.AppendLine($"        private readonly {underlyingFullName} __ntf_instance;");
+            // Not `readonly`: a struct underlying must stay mutable so `__ntf_instance.X = value` and
+            // mutating methods compile and take effect (CS1648 otherwise).
+            sb.AppendLine($"        private {underlyingFullName} __ntf_instance;");
             sb.AppendLine();
             sb.AppendLine($"        public {structName}({underlyingFullName} instance)");
             sb.AppendLine("        {");

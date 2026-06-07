@@ -20,7 +20,7 @@ public class FullTarget
         get => _data[index];
         set => _data[index] = value;
     }
-    public event Action<string> OnEvent;
+    public event Action<string>? OnEvent;
 
     public void RaiseEvent(string msg) => OnEvent?.Invoke(msg);
 
@@ -48,7 +48,7 @@ public class ExtendedMemberSupportTests
         Assert.Equal("hello", target[1]);
 
         // Event
-        string received = null;
+        string? received = null;
         ducked.OnEvent += msg => received = msg;
         target.RaiseEvent("test");
         Assert.Equal("test", received);

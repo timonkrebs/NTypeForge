@@ -51,9 +51,9 @@ namespace NTypeForge.SourceGenerator
                (m.MethodKind == MethodKind.PropertyGet || m.MethodKind == MethodKind.PropertySet ||
                 m.MethodKind == MethodKind.EventAdd || m.MethodKind == MethodKind.EventRemove);
 
-        // A member NTypeForge cannot proxy: a static abstract member (an instance struct can't
+        // A member NTypeForge cannot proxy: a static abstract member (an instance proxy can't
         // implement it); a by-ref return (the forwarding proxy would have to re-ref); or a member
-        // whose signature involves a pointer / function-pointer type (the generated struct is not
+        // whose signature involves a pointer / function-pointer type (the generated proxy is not
         // `unsafe`). Accessor methods are judged via their owning property/event.
         private static bool IsUnproxyable(ISymbol member)
         {
@@ -80,7 +80,7 @@ namespace NTypeForge.SourceGenerator
             => type.TypeKind == TypeKind.Pointer || type.TypeKind == TypeKind.FunctionPointer;
 
         // Accumulates the requirement buckets in a single traversal of the interface's members.
-        // Static members are never proxied (a proxy is an instance struct): a static *abstract*
+        // Static members are never proxied (a proxy is an instance object): a static *abstract*
         // member makes the interface unproxyable (-> Unsupported / NTF002), while a static member
         // with a default implementation is supplied by the interface itself, so the concrete need
         // not have it.
