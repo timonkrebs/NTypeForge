@@ -128,4 +128,19 @@ public class MemberDuckingRuntimeTests
 
         Assert.Equal(42, consumer.ReadValue(holder));
     }
+
+    public interface IEcho { T Echo<T>(T value); }
+
+    // The concrete names the type parameter differently from the interface (U vs T). It still
+    // structurally matches, and the generated proxy forwards correctly.
+    public class DifferentlyNamedEcho { public U Echo<U>(U value) => value; }
+
+    [Fact]
+    public void GenericMethod_DifferentTypeParameterName_InvokesThroughProxy()
+    {
+        IEcho echo = new DifferentlyNamedEcho().Duck<IEcho>();
+
+        Assert.Equal(7, echo.Echo(7));
+        Assert.Equal("hi", echo.Echo("hi"));
+    }
 }

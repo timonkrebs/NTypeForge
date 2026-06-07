@@ -32,11 +32,15 @@ namespace NTypeForge.SourceGenerator.Models
             => string.Join(",", parameters.Select(x => $"{x.RefKind}:{x.TypeFq}"));
     }
 
-    // A method reduced to render-ready primitives plus two canonical keys:
-    //   DedupKey  - name + parameter shape (refkind:type), excluding the return type. Collapses
-    //               methods re-abstracted across base interfaces that differ only by return type.
-    //   CompatKey - DedupKey plus the return type. Mirrors the old AreMethodsCompatible check
-    //               (same return type, parameter types and ref kinds) for structural matching.
+    // A method reduced to render-ready primitives plus two canonical keys (supplied by the caller,
+    // which is the only place that has the symbol needed to normalize generic methods):
+    //   DedupKey  - name + arity + parameter shape (+ constraints for generics), excluding the
+    //               return type. Collapses methods re-abstracted across base interfaces that differ
+    //               only by return type.
+    //   CompatKey - DedupKey plus the return type, for structural matching.
+    // For a generic method, the method's own type parameters are normalized to positional tokens in
+    // both keys, so two structurally identical generic methods match regardless of type-parameter
+    // names (see CandidateAnalyzer.NormalizeTypeKey).
     internal sealed class MethodSig
     {
         public string Name { get; }
@@ -50,7 +54,8 @@ namespace NTypeForge.SourceGenerator.Models
         public string CompatKey { get; }
 
         public MethodSig(string name, string returnTypeFq, bool returnsVoid, IReadOnlyList<ParamSig> parameters,
-                         int arity, IReadOnlyList<string> typeParameters, IReadOnlyList<string> constraints)
+                         int arity, IReadOnlyList<string> typeParameters, IReadOnlyList<string> constraints,
+                         string dedupKey, string compatKey)
         {
             Name = name;
             ReturnTypeFq = returnTypeFq;
@@ -59,9 +64,8 @@ namespace NTypeForge.SourceGenerator.Models
             Arity = arity;
             TypeParameters = typeParameters;
             Constraints = constraints;
-            var generic = arity > 0 ? $"`{arity}" : "";
-            DedupKey = $"{name}{generic}({ParamSig.Shape(parameters)})";
-            CompatKey = $"{returnTypeFq} {DedupKey}";
+            DedupKey = dedupKey;
+            CompatKey = compatKey;
         }
     }
 

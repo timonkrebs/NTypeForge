@@ -353,4 +353,25 @@ public class DiagnosticTests
         Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
+
+    // A concrete generic method whose constraint is STRICTER than the interface's cannot be safely
+    // proxied (the proxy would declare the looser signature and forward to the stricter method,
+    // failing CS0310). Constraints are part of the match key, so this is a clean NTF001 (no match)
+    // rather than emitted code that doesn't compile.
+    [Fact]
+    public void NTF001_WhenConcreteGenericConstraintStricterThanInterface()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IRunner { TItem Make<TItem>(); }
+                public class Impl { public TItem Make<TItem>() where TItem : new() => new TItem(); }
+                public class C { public void M() { var x = new Impl().Duck<IRunner>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
 }

@@ -172,10 +172,8 @@ namespace NTypeForge.SourceGenerator
             var surface = BuildSurfaceCompatKeys(underlyingType);
             var surfaceSet = new HashSet<string>(surface, StringComparer.Ordinal);
 
-            bool isSelfMatch = requirements.Methods.All(r => surfaceSet.Contains(r.CompatKey)) &&
-                               requirements.Properties.All(r => surfaceSet.Contains(r.CompatKey)) &&
-                               requirements.Indexers.All(r => surfaceSet.Contains(r.CompatKey)) &&
-                               requirements.Events.All(r => surfaceSet.Contains(r.CompatKey));
+            bool isSelfMatch = StructuralMatch.IsSatisfiedBy(
+                requirements.Methods, requirements.Properties, requirements.Indexers, requirements.Events, surfaceSet);
 
             var originalParams = originalMethod == null
                 ? (IReadOnlyList<ParamSig>)Array.Empty<ParamSig>()
@@ -221,32 +219,87 @@ namespace NTypeForge.SourceGenerator
             => new ParamSig(Fq(p.Type), p.RefKind, p.Name);
 
         private static MethodSig ToMethodSig(IMethodSymbol m)
-            => new MethodSig(
+        {
+            var parameters = m.Parameters.Select(ToParamSig).ToList();
+            var arity = m.Arity;
+
+            string dedupKey, compatKey;
+            if (arity == 0)
+            {
+                // Non-generic: keys are byte-identical to the pre-generics behaviour (Fq-based).
+                dedupKey = $"{m.Name}({ParamSig.Shape(parameters)})";
+                compatKey = $"{Fq(m.ReturnType)} {dedupKey}";
+            }
+            else
+            {
+                // Generic: normalize the method's own type parameters to positional tokens and fold
+                // in constraints. Two structurally identical generic methods then match regardless of
+                // type-parameter names, and a concrete whose constraints differ from the interface
+                // does NOT match (its forwarding call `_instance.M<T>(...)` wouldn't compile).
+                var paramKey = string.Join(",", m.Parameters.Select(p => $"{p.RefKind}:{NormalizeTypeKey(p.Type)}"));
+                dedupKey = $"{m.Name}`{arity}({paramKey}){NormalizeConstraintKey(m.TypeParameters)}";
+                compatKey = $"{NormalizeTypeKey(m.ReturnType)} {dedupKey}";
+            }
+
+            return new MethodSig(
                 m.Name,
                 Fq(m.ReturnType),
                 m.ReturnType.SpecialType == SpecialType.System_Void,
-                m.Parameters.Select(ToParamSig).ToList(),
-                m.Arity,
+                parameters,
+                arity,
                 m.TypeParameters.Select(tp => tp.Name).ToList(),
-                m.TypeParameters.Select(GetConstraints).ToList()
-            );
+                m.TypeParameters.Select(GetConstraints).ToList(),
+                dedupKey,
+                compatKey);
+        }
 
-        private static string GetConstraints(ITypeParameterSymbol tp)
+        private static readonly SymbolDisplayFormat FqNoGenerics =
+            SymbolDisplayFormat.FullyQualifiedFormat.WithGenericsOptions(SymbolDisplayGenericsOptions.None);
+
+        // A type rendered for use in a *match key*, with the enclosing method's own type parameters
+        // replaced by positional tokens (``0, ``1, ...) so two generic methods that differ only by
+        // type-parameter name produce the same key. Plain (non-method-type-parameter) types keep
+        // their fully-qualified form, recursing through arrays and constructed generics.
+        private static string NormalizeTypeKey(ITypeSymbol type)
+        {
+            if (type is ITypeParameterSymbol { TypeParameterKind: TypeParameterKind.Method } tp)
+                return $"``{tp.Ordinal}";
+            if (type is IArrayTypeSymbol array)
+                return $"{NormalizeTypeKey(array.ElementType)}[{new string(',', array.Rank - 1)}]";
+            if (type is INamedTypeSymbol { IsGenericType: true } named)
+                return $"{named.ToDisplayString(FqNoGenerics)}<{string.Join(",", named.TypeArguments.Select(NormalizeTypeKey))}>";
+            return Fq(type);
+        }
+
+        // The ordered constraint tokens for one type parameter. `formatType` controls how constraint
+        // types are rendered: Fq for emitted `where` clauses, NormalizeTypeKey for match keys.
+        private static List<string> ConstraintList(ITypeParameterSymbol tp, Func<ITypeSymbol, string> formatType)
         {
             var constraints = new List<string>();
             if (tp.HasReferenceTypeConstraint) constraints.Add("class");
             if (tp.HasValueTypeConstraint) constraints.Add("struct");
             if (tp.HasUnmanagedTypeConstraint) constraints.Add("unmanaged");
             if (tp.HasNotNullConstraint) constraints.Add("notnull");
-            foreach (var t in tp.ConstraintTypes)
-            {
-                constraints.Add(Fq(t));
-            }
+            foreach (var t in tp.ConstraintTypes) constraints.Add(formatType(t));
             if (tp.HasConstructorConstraint) constraints.Add("new()");
+            return constraints;
+        }
 
-            return constraints.Count > 0
-                ? $"where {tp.Name} : {string.Join(", ", constraints)}"
-                : "";
+        private static string GetConstraints(ITypeParameterSymbol tp)
+        {
+            var constraints = ConstraintList(tp, Fq);
+            return constraints.Count > 0 ? $"where {tp.Name} : {string.Join(", ", constraints)}" : "";
+        }
+
+        private static string NormalizeConstraintKey(IEnumerable<ITypeParameterSymbol> typeParameters)
+        {
+            var parts = new List<string>();
+            foreach (var tp in typeParameters)
+            {
+                var constraints = ConstraintList(tp, NormalizeTypeKey);
+                if (constraints.Count > 0) parts.Add($"`{tp.Ordinal}:{string.Join(",", constraints)}");
+            }
+            return parts.Count > 0 ? $"|{string.Join("|", parts)}" : "";
         }
 
         private static PropertySig ToPropertySig(IPropertySymbol p)
@@ -307,9 +360,9 @@ namespace NTypeForge.SourceGenerator
             private readonly List<IndexerSig> _indexers = new List<IndexerSig>();
             private readonly List<EventSig> _events = new List<EventSig>();
             private readonly HashSet<string> _seenMethods = new HashSet<string>(StringComparer.Ordinal);
-            private readonly HashSet<string> _seenProperties = new HashSet<string>(StringComparer.Ordinal);
-            private readonly HashSet<string> _seenIndexers = new HashSet<string>(StringComparer.Ordinal);
             private readonly HashSet<string> _seenEvents = new HashSet<string>(StringComparer.Ordinal);
+            private readonly Dictionary<string, int> _propertyIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+            private readonly Dictionary<string, int> _indexerIndex = new Dictionary<string, int>(StringComparer.Ordinal);
             private string? _unsupported;
 
             public void Observe(ISymbol member)
@@ -324,8 +377,10 @@ namespace NTypeForge.SourceGenerator
             private void TrackUnsupported(ISymbol member)
             {
                 if (_unsupported != null) return;
-                if (member.IsStatic && member.IsAbstract &&
-                    (member is IMethodSymbol { MethodKind: MethodKind.Ordinary } || member is IPropertySymbol || member is IEventSymbol))
+                // Any static abstract member is unproxyable by an instance struct - methods,
+                // properties, events, AND operators/conversions. Accessor methods (get_/set_/add_/
+                // remove_) are skipped; their owning property/event is reported instead.
+                if (member.IsStatic && member.IsAbstract && !IsAccessorMethod(member))
                 {
                     _unsupported = member.Name;
                 }
@@ -337,28 +392,68 @@ namespace NTypeForge.SourceGenerator
                 {
                     case IMethodSymbol { MethodKind: MethodKind.Ordinary } method:
                         var m = ToMethodSig(method);
-                        Dedup(_seenMethods, m.DedupKey, _methods, m);
+                        if (_seenMethods.Add(m.DedupKey)) _methods.Add(m);
                         break;
                     case IPropertySymbol { IsIndexer: true } indexer:
-                        var ix = ToIndexerSig(indexer);
-                        Dedup(_seenIndexers, ix.DedupKey, _indexers, ix);
+                        AddOrMergeIndexer(ToIndexerSig(indexer));
                         break;
                     case IPropertySymbol prop:
-                        var p = ToPropertySig(prop);
-                        Dedup(_seenProperties, p.Name, _properties, p);
+                        AddOrMergeProperty(ToPropertySig(prop));
                         break;
                     case IEventSymbol evt:
                         var e = ToEventSig(evt);
-                        Dedup(_seenEvents, e.Name, _events, e);
+                        if (_seenEvents.Add(e.Name)) _events.Add(e);
                         break;
                 }
             }
 
-            private static void Dedup<T>(HashSet<string> seen, string key, List<T> list, T sig)
+            // A property name can appear across several base interfaces with different accessor sets
+            // (e.g. IGet declares `{ get; }`, IGetSet declares `{ get; set; }`). The interface requires
+            // the UNION of accessors, so merge rather than keep-first - otherwise the proxy omits an
+            // accessor and fails CS0535. Merge is commutative, so the result is order-independent.
+            private void AddOrMergeProperty(PropertySig sig)
             {
-                if (seen.Add(key)) list.Add(sig);
+                if (_propertyIndex.TryGetValue(sig.Name, out var i))
+                {
+                    _properties[i] = MergeProperty(_properties[i], sig);
+                }
+                else
+                {
+                    _propertyIndex[sig.Name] = _properties.Count;
+                    _properties.Add(sig);
+                }
             }
+
+            private void AddOrMergeIndexer(IndexerSig sig)
+            {
+                if (_indexerIndex.TryGetValue(sig.DedupKey, out var i))
+                {
+                    _indexers[i] = MergeIndexer(_indexers[i], sig);
+                }
+                else
+                {
+                    _indexerIndex[sig.DedupKey] = _indexers.Count;
+                    _indexers.Add(sig);
+                }
+            }
+
+            private static PropertySig MergeProperty(PropertySig a, PropertySig b)
+            {
+                var hasSet = a.HasSet || b.HasSet;
+                // The merged setter is init-only only if every contributing setter is init-only; a
+                // plain `set` in any declaration means the proxy must expose a plain `set`.
+                var hasPlainSet = (a.HasSet && !a.IsInit) || (b.HasSet && !b.IsInit);
+                return new PropertySig(a.Name, a.TypeFq, a.HasGet || b.HasGet, hasSet, hasSet && !hasPlainSet);
+            }
+
+            private static IndexerSig MergeIndexer(IndexerSig a, IndexerSig b)
+                => new IndexerSig(a.TypeFq, a.Parameters, a.HasGet || b.HasGet, a.HasSet || b.HasSet);
         }
+
+        private static bool IsAccessorMethod(ISymbol member)
+            => member is IMethodSymbol m &&
+               (m.MethodKind == MethodKind.PropertyGet || m.MethodKind == MethodKind.PropertySet ||
+                m.MethodKind == MethodKind.EventAdd || m.MethodKind == MethodKind.EventRemove);
 
         // CompatKeys of the type's directly-declared members.
         private static IReadOnlyList<string> BuildSurfaceCompatKeys(ITypeSymbol type)

@@ -181,9 +181,8 @@ namespace NTypeForge.SourceGenerator
         }
 
         private static bool ConcreteSatisfies(InterfaceInfo iface, ConcreteInfo concrete)
-            => iface.MethodRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
-               iface.PropertyRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
-               iface.IndexerRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
-               iface.EventRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey));
+            => StructuralMatch.IsSatisfiedBy(
+                iface.MethodRequirements, iface.PropertyRequirements, iface.IndexerRequirements,
+                iface.EventRequirements, concrete.SurfaceKeys);
     }
 }

@@ -419,4 +419,67 @@ public class CodegenValidityTests
 
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
+
+    // A generic method whose type parameter is named differently on the interface and the concrete
+    // is still a structural match (match keys normalize type parameters positionally). Regression
+    // for the false-negative where `T Create<T>()` failed to match `U Create<U>()`.
+    [Fact]
+    public void GenericMethod_DifferentTypeParameterName_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IFactory { TItem Create<TItem>(); }
+                public class Factory { public TOther Create<TOther>() => default!; }
+                public class C { public void M() { var x = new Factory().Duck<IFactory>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // The same property is split across two base interfaces with different accessor sets; the
+    // requirement is the union (get + set), so the proxy must implement both. Regression for the
+    // dedup-by-name bug that dropped an accessor and produced CS0535.
+    [Fact]
+    public void PropertySplitAcrossBaseInterfaces_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IGet { int V { get; } }
+                public interface IGetSet { int V { get; set; } }
+                public interface IBoth : IGet, IGetSet { }
+                public class Impl { public int V { get; set; } }
+                public class C { public void M() { var x = new Impl().Duck<IBoth>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // The indexer analogue of the property split: get-only and get/set indexers across two base
+    // interfaces merge to get + set.
+    [Fact]
+    public void IndexerSplitAcrossBaseInterfaces_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IRead { int this[int i] { get; } }
+                public interface IWrite { int this[int i] { get; set; } }
+                public interface IBoth : IRead, IWrite { }
+                public class Impl { public int this[int i] { get => i; set { } } }
+                public class C { public void M() { var x = new Impl().Duck<IBoth>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
 }
