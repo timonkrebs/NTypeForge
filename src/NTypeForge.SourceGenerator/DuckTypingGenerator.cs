@@ -88,89 +88,87 @@ namespace NTypeForge.SourceGenerator
         {
             var invocation = (InvocationExpressionSyntax)context.Node;
             var semanticModel = context.SemanticModel;
-
             var symbolInfo = semanticModel.GetSymbolInfo(invocation);
 
-            // Handle Duck<T> calls
-            if (symbolInfo.Symbol is IMethodSymbol resolvedMethod && resolvedMethod.Name == "Duck" &&
-                IsTopLevelNTypeForgeNamespace(resolvedMethod.ContainingNamespace) && resolvedMethod.TypeArguments.Length == 1)
-            {
-                var targetInterface = resolvedMethod.TypeArguments[0];
-                ExpressionSyntax? instanceExpr = null;
-                if (invocation.Expression is MemberAccessExpressionSyntax memberAccess)
-                {
-                    instanceExpr = memberAccess.Expression;
-                }
-                else if (invocation.ArgumentList.Arguments.Count == 1)
-                {
-                    instanceExpr = invocation.ArgumentList.Arguments[0].Expression;
-                }
+            var duckCall = TryGetDuckCall(invocation, semanticModel, symbolInfo);
+            if (duckCall != null) return duckCall;
 
-                if (instanceExpr != null)
-                {
-                    var argType = semanticModel.GetTypeInfo(instanceExpr).Type;
-                    if (argType != null)
-                    {
-                        var underlyingType = GetUnderlyingType(argType);
-                        if (targetInterface.TypeKind == TypeKind.Interface && IsProxyableKind(underlyingType))
-                        {
-                            return BuildModel(
-                                invocation,
-                                target: argType,
-                                argType: argType,
-                                underlyingType: underlyingType,
-                                interfaceType: targetInterface,
-                                argumentIndex: 0,
-                                isStatic: false,
-                                isDuckCall: true,
-                                originalMethod: null);
-                        }
-                    }
-                }
-            }
+            // A call that bound successfully needs no duck typing; only a failed overload
+            // resolution (Symbol == null, with candidates) can be rescued by a generated proxy.
+            if (symbolInfo.Symbol != null || symbolInfo.CandidateSymbols.Length == 0) return null;
 
-            if (symbolInfo.Symbol != null) return null;
-            if (symbolInfo.CandidateSymbols.Length == 0) return null;
+            return TryGetMethodArgumentDuck(invocation, semanticModel, symbolInfo);
+        }
 
+        // An explicit `instance.Duck<T>()` (or `Duck<T>(instance)`) call.
+        private static CandidateModel? TryGetDuckCall(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
+        {
+            if (!(symbolInfo.Symbol is IMethodSymbol resolved) || resolved.Name != "Duck" ||
+                !IsTopLevelNTypeForgeNamespace(resolved.ContainingNamespace) || resolved.TypeArguments.Length != 1)
+                return null;
+
+            var instanceExpr = GetDuckInstanceExpression(invocation);
+            if (instanceExpr == null) return null;
+
+            var argType = semanticModel.GetTypeInfo(instanceExpr).Type;
+            if (argType == null) return null;
+
+            var targetInterface = resolved.TypeArguments[0];
+            var underlyingType = GetUnderlyingType(argType);
+            if (targetInterface.TypeKind != TypeKind.Interface || !IsProxyableKind(underlyingType)) return null;
+
+            return BuildModel(
+                invocation, target: argType, argType: argType, underlyingType: underlyingType,
+                interfaceType: targetInterface, argumentIndex: 0, isStatic: false, isDuckCall: true, originalMethod: null);
+        }
+
+        private static ExpressionSyntax? GetDuckInstanceExpression(InvocationExpressionSyntax invocation)
+        {
+            if (invocation.Expression is MemberAccessExpressionSyntax memberAccess) return memberAccess.Expression;
+            if (invocation.ArgumentList.Arguments.Count == 1) return invocation.ArgumentList.Arguments[0].Expression;
+            return null;
+        }
+
+        // A failed call whose argument could implicitly become an interface parameter via a proxy.
+        private static CandidateModel? TryGetMethodArgumentDuck(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
+        {
             foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
             {
-                ITypeSymbol? targetType = candidate.ContainingType;
-                if (targetType == null) continue;
-
+                if (candidate.ContainingType == null) continue;
                 var arguments = invocation.ArgumentList.Arguments;
                 if (arguments.Count != candidate.Parameters.Length) continue;
 
-                for (int i = 0; i < arguments.Count; i++)
-                {
-                    var arg = arguments[i];
-                    var argType = semanticModel.GetTypeInfo(arg.Expression).Type;
-                    var param = candidate.Parameters[i];
-                    var paramType = param.Type;
-
-                    if (argType == null || paramType == null) continue;
-
-                    var underlyingType = GetUnderlyingType(argType);
-
-                    var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
-                    if (!conversion.Exists || !conversion.IsImplicit)
-                    {
-                        if (paramType.TypeKind == TypeKind.Interface && IsProxyableKind(underlyingType))
-                        {
-                            return BuildModel(
-                                invocation,
-                                target: targetType,
-                                argType: argType,
-                                underlyingType: underlyingType,
-                                interfaceType: paramType,
-                                argumentIndex: i,
-                                isStatic: candidate.IsStatic,
-                                isDuckCall: false,
-                                originalMethod: candidate);
-                        }
-                    }
-                }
+                var model = TryDuckArgument(invocation, semanticModel, candidate, arguments);
+                if (model != null) return model;
             }
+            return null;
+        }
 
+        private static CandidateModel? TryDuckArgument(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel,
+            IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments)
+        {
+            for (int i = 0; i < arguments.Count; i++)
+            {
+                var arg = arguments[i];
+                var argType = semanticModel.GetTypeInfo(arg.Expression).Type;
+                var paramType = candidate.Parameters[i].Type;
+
+                if (argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) continue;
+
+                var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
+                if (conversion.Exists && conversion.IsImplicit) continue;
+
+                var underlyingType = GetUnderlyingType(argType);
+                if (!IsProxyableKind(underlyingType)) continue;
+
+                return BuildModel(
+                    invocation, target: candidate.ContainingType, argType: argType, underlyingType: underlyingType,
+                    interfaceType: paramType, argumentIndex: i, isStatic: candidate.IsStatic, isDuckCall: false,
+                    originalMethod: candidate);
+            }
             return null;
         }
 
@@ -367,49 +365,61 @@ namespace NTypeForge.SourceGenerator
             var result = new List<string>();
             foreach (var member in type.GetMembers())
             {
-                if (member is IMethodSymbol method && method.MethodKind == MethodKind.Ordinary)
-                {
-                    result.Add(ToMethodSig(method).CompatKey);
-                }
-                else if (member is IPropertySymbol prop)
-                {
-                    if (prop.IsIndexer)
-                    {
-                        var sig = ToIndexerSig(prop);
-                        if (prop.GetMethod != null) result.Add(new IndexerSig(sig.TypeFq, sig.Parameters, true, false).CompatKey);
-                        if (prop.SetMethod != null) result.Add(new IndexerSig(sig.TypeFq, sig.Parameters, false, true).CompatKey);
-                        if (prop.GetMethod != null && prop.SetMethod != null) result.Add(sig.CompatKey);
-                    }
-                    else
-                    {
-                        var sig = ToPropertySig(prop);
-                        var canGet = prop.GetMethod != null;
-                        // A regular `set` can forward both `set` and `init` requirements; an
-                        // init-only setter can forward neither (the proxy wraps an already-
-                        // constructed instance, so `_instance.X = value` is illegal - CS8852).
-                        // Advertise the writable capability only for a non-init setter, so an
-                        // init-only underlying is treated as effectively get-only and never
-                        // matched to a requirement it cannot fulfill.
-                        var canSet = prop.SetMethod is { IsInitOnly: false };
-                        if (canGet) result.Add(new PropertySig(sig.Name, sig.TypeFq, true, false, false).CompatKey);
-                        if (canSet)
-                        {
-                            result.Add(new PropertySig(sig.Name, sig.TypeFq, false, true, false).CompatKey);
-                            result.Add(new PropertySig(sig.Name, sig.TypeFq, false, true, true).CompatKey);
-                        }
-                        if (canGet && canSet)
-                        {
-                            result.Add(new PropertySig(sig.Name, sig.TypeFq, true, true, false).CompatKey);
-                            result.Add(new PropertySig(sig.Name, sig.TypeFq, true, true, true).CompatKey);
-                        }
-                    }
-                }
-                else if (member is IEventSymbol evt)
-                {
-                    result.Add(ToEventSig(evt).CompatKey);
-                }
+                result.AddRange(SurfaceKeysForMember(member));
             }
             return result.Distinct(StringComparer.Ordinal).ToList();
+        }
+
+        // Every requirement key the member can satisfy on a concrete surface (a member may
+        // satisfy several - e.g. a get/set property also satisfies a get-only requirement).
+        private static IEnumerable<string> SurfaceKeysForMember(ISymbol member)
+        {
+            switch (member)
+            {
+                case IMethodSymbol { MethodKind: MethodKind.Ordinary } method:
+                    return new[] { ToMethodSig(method).CompatKey };
+                case IPropertySymbol { IsIndexer: true } indexer:
+                    return IndexerSurfaceKeys(indexer);
+                case IPropertySymbol prop:
+                    return PropertySurfaceKeys(prop);
+                case IEventSymbol evt:
+                    return new[] { ToEventSig(evt).CompatKey };
+                default:
+                    return Array.Empty<string>();
+            }
+        }
+
+        private static IEnumerable<string> IndexerSurfaceKeys(IPropertySymbol indexer)
+        {
+            var sig = ToIndexerSig(indexer);
+            var canGet = indexer.GetMethod != null;
+            var canSet = indexer.SetMethod != null;
+            if (canGet) yield return new IndexerSig(sig.TypeFq, sig.Parameters, true, false).CompatKey;
+            if (canSet) yield return new IndexerSig(sig.TypeFq, sig.Parameters, false, true).CompatKey;
+            if (canGet && canSet) yield return sig.CompatKey;
+        }
+
+        private static IEnumerable<string> PropertySurfaceKeys(IPropertySymbol prop)
+        {
+            var sig = ToPropertySig(prop);
+            var canGet = prop.GetMethod != null;
+            // A regular `set` can forward both `set` and `init` requirements; an init-only setter
+            // can forward neither (the proxy wraps an already-constructed instance, so
+            // `_instance.X = value` is illegal - CS8852). Advertise the writable capability only for
+            // a non-init setter, so an init-only underlying is treated as effectively get-only and
+            // never matched to a requirement it cannot fulfill.
+            var canSet = prop.SetMethod is { IsInitOnly: false };
+            if (canGet) yield return new PropertySig(sig.Name, sig.TypeFq, true, false, false).CompatKey;
+            if (canSet)
+            {
+                yield return new PropertySig(sig.Name, sig.TypeFq, false, true, false).CompatKey;
+                yield return new PropertySig(sig.Name, sig.TypeFq, false, true, true).CompatKey;
+            }
+            if (canGet && canSet)
+            {
+                yield return new PropertySig(sig.Name, sig.TypeFq, true, true, false).CompatKey;
+                yield return new PropertySig(sig.Name, sig.TypeFq, true, true, true).CompatKey;
+            }
         }
 
         // Returns the first interface member NTypeForge cannot proxy.
@@ -492,86 +502,105 @@ namespace NTypeForge.SourceGenerator
 
             foreach (var candidate in candidates)
             {
-                // Skip unsupported
-                if (candidate.UnsupportedMemberName != null)
-                {
-                    if (candidate.IsDuckCall)
-                    {
-                        context.ReportDiagnostic(Diagnostic.Create(
-                            UnsupportedInterfaceMember,
-                            candidate.ToLocation(),
-                            candidate.InterfaceFq,
-                            candidate.UnsupportedMemberName));
-                    }
-                    continue;
-                }
-
-                if (candidate.IsSelfMatch)
-                {
-                    allExtensions.Add(candidate);
-
-                    if (!interfaceInfo.ContainsKey(candidate.InterfaceFq))
-                    {
-                        interfaceInfo[candidate.InterfaceFq] = new InterfaceInfo
-                        {
-                            Fq = candidate.InterfaceFq,
-                            MinimalName = candidate.InterfaceMinimalName,
-                            MethodRequirements = candidate.MethodRequirements,
-                            PropertyRequirements = candidate.PropertyRequirements,
-                            IndexerRequirements = candidate.IndexerRequirements,
-                            EventRequirements = candidate.EventRequirements
-                        };
-                    }
-
-                    if (!candidate.UnderlyingIsInterface && !concreteInfo.ContainsKey(candidate.UnderlyingFq))
-                    {
-                        concreteInfo[candidate.UnderlyingFq] = new ConcreteInfo
-                        {
-                            Fq = candidate.UnderlyingFq,
-                            Namespace = candidate.UnderlyingNamespace,
-                            MinimalName = candidate.UnderlyingMinimalName,
-                            BaseDepth = candidate.UnderlyingBaseDepth,
-                            SurfaceKeys = new HashSet<string>(candidate.UnderlyingSurfaceCompatKeys, StringComparer.Ordinal),
-                        };
-                    }
-                }
-                else if (candidate.IsDuckCall)
-                {
-                    context.ReportDiagnostic(Diagnostic.Create(
-                        NoStructuralMatch,
-                        candidate.ToLocation(),
-                        candidate.UnderlyingFq,
-                        candidate.InterfaceFq));
-                }
+                ProcessCandidate(context, candidate, allExtensions, interfaceInfo, concreteInfo);
             }
 
             if (allExtensions.Count == 0) return;
 
-            // Matching
-            var possibleMatches = new Dictionary<string, List<ConcreteInfo>>(StringComparer.Ordinal);
-            foreach (var iface in interfaceInfo.Values.OrderBy(i => i.Fq, StringComparer.Ordinal))
-            {
-                var list = new List<ConcreteInfo>();
-                foreach (var concrete in concreteInfo.Values
-                             .OrderByDescending(c => c.BaseDepth)
-                             .ThenBy(c => c.Fq, StringComparer.Ordinal))
-                {
-                    bool match = iface.MethodRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
-                                 iface.PropertyRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
-                                 iface.IndexerRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
-                                 iface.EventRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey));
-
-                    if (match)
-                    {
-                        list.Add(concrete);
-                    }
-                }
-                possibleMatches[iface.Fq] = list;
-            }
+            var possibleMatches = ComputeMatches(interfaceInfo, concreteInfo);
 
             EmitProxies(context, allExtensions, possibleMatches, interfaceInfo);
             EmitExtensions(context, allExtensions, possibleMatches, interfaceInfo);
         }
+
+        // Sort one candidate into the emit set (structural self-match), a diagnostic (an
+        // unmatched Duck<T> or an unsupported member), or silent drop (an unmatched implicit
+        // method-argument duck, where the original call error already stands).
+        private static void ProcessCandidate(
+            SourceProductionContext context, CandidateModel candidate,
+            List<CandidateModel> allExtensions,
+            Dictionary<string, InterfaceInfo> interfaceInfo,
+            Dictionary<string, ConcreteInfo> concreteInfo)
+        {
+            if (candidate.UnsupportedMemberName != null)
+            {
+                if (candidate.IsDuckCall)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        UnsupportedInterfaceMember, candidate.ToLocation(),
+                        candidate.InterfaceFq, candidate.UnsupportedMemberName));
+                }
+                return;
+            }
+
+            if (!candidate.IsSelfMatch)
+            {
+                if (candidate.IsDuckCall)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        NoStructuralMatch, candidate.ToLocation(),
+                        candidate.UnderlyingFq, candidate.InterfaceFq));
+                }
+                return;
+            }
+
+            allExtensions.Add(candidate);
+            RegisterInterface(interfaceInfo, candidate);
+            RegisterConcrete(concreteInfo, candidate);
+        }
+
+        private static void RegisterInterface(Dictionary<string, InterfaceInfo> interfaceInfo, CandidateModel candidate)
+        {
+            if (interfaceInfo.ContainsKey(candidate.InterfaceFq)) return;
+            interfaceInfo[candidate.InterfaceFq] = new InterfaceInfo
+            {
+                Fq = candidate.InterfaceFq,
+                MinimalName = candidate.InterfaceMinimalName,
+                MethodRequirements = candidate.MethodRequirements,
+                PropertyRequirements = candidate.PropertyRequirements,
+                IndexerRequirements = candidate.IndexerRequirements,
+                EventRequirements = candidate.EventRequirements,
+            };
+        }
+
+        private static void RegisterConcrete(Dictionary<string, ConcreteInfo> concreteInfo, CandidateModel candidate)
+        {
+            if (candidate.UnderlyingIsInterface || concreteInfo.ContainsKey(candidate.UnderlyingFq)) return;
+            concreteInfo[candidate.UnderlyingFq] = new ConcreteInfo
+            {
+                Fq = candidate.UnderlyingFq,
+                Namespace = candidate.UnderlyingNamespace,
+                MinimalName = candidate.UnderlyingMinimalName,
+                BaseDepth = candidate.UnderlyingBaseDepth,
+                SurfaceKeys = new HashSet<string>(candidate.UnderlyingSurfaceCompatKeys, StringComparer.Ordinal),
+            };
+        }
+
+        private static Dictionary<string, List<ConcreteInfo>> ComputeMatches(
+            Dictionary<string, InterfaceInfo> interfaceInfo,
+            Dictionary<string, ConcreteInfo> concreteInfo)
+        {
+            // For each interface, the concrete types that structurally match it, most-derived
+            // first: the generated unwrap branches test `TryUnbox<C>` (an `is C` check), which is
+            // also true for subtypes of C, so a derived type must win its own branch ahead of its
+            // base. Ties broken by fully-qualified name for deterministic output.
+            var possibleMatches = new Dictionary<string, List<ConcreteInfo>>(StringComparer.Ordinal);
+            foreach (var iface in interfaceInfo.Values.OrderBy(i => i.Fq, StringComparer.Ordinal))
+            {
+                possibleMatches[iface.Fq] = concreteInfo.Values
+                    .OrderByDescending(c => c.BaseDepth)
+                    .ThenBy(c => c.Fq, StringComparer.Ordinal)
+                    .Where(c => ConcreteSatisfies(iface, c))
+                    .ToList();
+            }
+            return possibleMatches;
+        }
+
+        private static bool ConcreteSatisfies(InterfaceInfo iface, ConcreteInfo concrete)
+            => iface.MethodRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
+               iface.PropertyRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
+               iface.IndexerRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey)) &&
+               iface.EventRequirements.All(r => concrete.SurfaceKeys.Contains(r.CompatKey));
 
         private static void EmitProxies(
             SourceProductionContext context,
@@ -759,51 +788,64 @@ namespace NTypeForge.SourceGenerator
             foreach (var candidate in items)
             {
                 if (candidate.IsDuckCall) continue;
+                EmitForwardingMethod(sb, candidate, targetFullName, possibleMatches, generatedMethods);
+            }
+        }
 
-                var argIndex = candidate.ArgumentIndex;
-                var parameters = candidate.OriginalParameters;
-                var argName = parameters[argIndex].Name;
-                var receiver = candidate.IsStatic ? targetFullName : "target";
-                var methodName = candidate.OriginalMethodName;
+        private static void EmitForwardingMethod(
+            StringBuilder sb, CandidateModel candidate, string targetFullName,
+            Dictionary<string, List<ConcreteInfo>> possibleMatches, HashSet<string> generatedMethods)
+        {
+            var argIndex = candidate.ArgumentIndex;
+            var parameters = candidate.OriginalParameters;
+            var argName = parameters[argIndex].Name;
+            var receiver = candidate.IsStatic ? targetFullName : "target";
+            var methodName = candidate.OriginalMethodName;
 
-                // The forwarding call's argument list, with the duck-typed argument replaced by
-                // `argReplacement` and every other parameter passed through verbatim.
-                string CallArgs(string argReplacement) => string.Join(", ", parameters.Select((p, idx) =>
-                    idx == argIndex ? argReplacement : $"{RefPrefix(p.RefKind)}{p.Name}"));
+            // The forwarding call's argument list, with the duck-typed argument replaced by
+            // `argReplacement` and every other parameter passed through verbatim.
+            string CallArgs(string argReplacement) => string.Join(", ", parameters.Select((p, idx) =>
+                idx == argIndex ? argReplacement : $"{RefPrefix(p.RefKind)}{p.Name}"));
 
-                var methodParams = string.Join(", ", parameters.Select((p, idx) =>
-                    $"{RefPrefix(p.RefKind)}{(idx == argIndex ? candidate.ArgumentFq : p.TypeFq)} {p.Name}"));
+            var methodParams = string.Join(", ", parameters.Select((p, idx) =>
+                $"{RefPrefix(p.RefKind)}{(idx == argIndex ? candidate.ArgumentFq : p.TypeFq)} {p.Name}"));
 
-                var methodSig = $"{methodName}({methodParams})";
-                if (!generatedMethods.Add(methodSig)) continue;
+            var methodSig = $"{methodName}({methodParams})";
+            if (!generatedMethods.Add(methodSig)) return;
 
-                var isStatic = candidate.IsStatic ? "static " : "";
-                sb.AppendLine($"            public {isStatic}{candidate.OriginalReturnTypeFq} {methodName}({methodParams})");
-                sb.AppendLine("            {");
+            var isStatic = candidate.IsStatic ? "static " : "";
+            sb.AppendLine($"            public {isStatic}{candidate.OriginalReturnTypeFq} {methodName}({methodParams})");
+            sb.AppendLine("            {");
 
-                // Unwrap branches only make sense when the incoming value can actually be a proxy,
-                // i.e. when its static type is an interface. For a concrete argument type they are
-                // dead branches and force a needless box, so we skip straight to the direct wrap.
-                if (candidate.ArgumentIsInterface && possibleMatches.TryGetValue(candidate.InterfaceFq, out var matches))
-                {
-                    int ui = 0;
-                    foreach (var m in matches)
-                    {
-                        var local = $"c_{ui++}";
-                        var proxy = ProxyFullName(m.Namespace, m.MinimalName, candidate.InterfaceMinimalName);
-                        var call = $"{receiver}.{methodName}({CallArgs($"new {proxy}({local})")})";
-                        sb.AppendLine($"                if ({argName}.TryUnbox<{m.Fq}>(out var {local})) {{");
-                        sb.AppendLine($"                    {(candidate.OriginalReturnsVoid ? $"{call}; return;" : $"return {call};")}");
-                        sb.AppendLine("                }");
-                    }
-                }
+            EmitForwardingUnwrapBranches(sb, candidate, argName, receiver, methodName, CallArgs, possibleMatches);
 
-                // Direct wrap fallback; see the note in EmitDuckMethod for the cross-assembly
-                // double-wrap boundary (recoverable via TryUnbox/Unbox).
-                var directProxy = ProxyFullName(candidate.UnderlyingNamespace, candidate.UnderlyingMinimalName, candidate.InterfaceMinimalName);
-                var directCall = $"{receiver}.{methodName}({CallArgs($"new {directProxy}(({candidate.UnderlyingFq}){argName})")})";
-                sb.AppendLine($"                {ReturnStatement(candidate.OriginalReturnsVoid, directCall)}");
-                sb.AppendLine("            }");
+            // Direct wrap fallback; see the note in EmitDuckMethod for the cross-assembly
+            // double-wrap boundary (recoverable via TryUnbox/Unbox).
+            var directProxy = ProxyFullName(candidate.UnderlyingNamespace, candidate.UnderlyingMinimalName, candidate.InterfaceMinimalName);
+            var directCall = $"{receiver}.{methodName}({CallArgs($"new {directProxy}(({candidate.UnderlyingFq}){argName})")})";
+            sb.AppendLine($"                {ReturnStatement(candidate.OriginalReturnsVoid, directCall)}");
+            sb.AppendLine("            }");
+        }
+
+        private static void EmitForwardingUnwrapBranches(
+            StringBuilder sb, CandidateModel candidate, string argName, string receiver, string methodName,
+            Func<string, string> callArgs, Dictionary<string, List<ConcreteInfo>> possibleMatches)
+        {
+            // Unwrap branches only make sense when the incoming value can actually be a proxy, i.e.
+            // when its static type is an interface. For a concrete argument type they are dead
+            // branches and force a needless box, so we skip straight to the direct wrap.
+            if (!candidate.ArgumentIsInterface || !possibleMatches.TryGetValue(candidate.InterfaceFq, out var matches))
+                return;
+
+            int ui = 0;
+            foreach (var m in matches)
+            {
+                var local = $"c_{ui++}";
+                var proxy = ProxyFullName(m.Namespace, m.MinimalName, candidate.InterfaceMinimalName);
+                var call = $"{receiver}.{methodName}({callArgs($"new {proxy}({local})")})";
+                sb.AppendLine($"                if ({argName}.TryUnbox<{m.Fq}>(out var {local})) {{");
+                sb.AppendLine($"                    {(candidate.OriginalReturnsVoid ? $"{call}; return;" : $"return {call};")}");
+                sb.AppendLine("                }");
             }
         }
 
@@ -826,57 +868,61 @@ namespace NTypeForge.SourceGenerator
             sb.AppendLine($"        object IProxy.Unwrapped => _instance;");
             sb.AppendLine();
 
-            foreach (var method in proxy.MethodRequirements)
-            {
-                var typeParams = method.Arity > 0 ? $"<{string.Join(", ", method.TypeParameters)}>" : "";
-                var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {p.Name}"));
-                var argsStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.Name}"));
-
-                sb.AppendLine($"        public {method.ReturnTypeFq} {method.Name}{typeParams}({parametersStr})");
-                foreach (var constraint in method.Constraints)
-                {
-                    if (!string.IsNullOrEmpty(constraint))
-                        sb.AppendLine($"            {constraint}");
-                }
-                sb.AppendLine("        {");
-                sb.AppendLine($"            {ReturnStatement(method.ReturnsVoid, $"_instance.{method.Name}{typeParams}({argsStr})")}");
-                sb.AppendLine("        }");
-            }
-
-            foreach (var prop in proxy.PropertyRequirements)
-            {
-                sb.AppendLine($"        public {prop.TypeFq} {prop.Name}");
-                sb.AppendLine("        {");
-                if (prop.HasGet) sb.AppendLine($"            get => _instance.{prop.Name};");
-                // Match the interface's accessor kind: an `init`-only property must be implemented
-                // with `init` (CS8854 otherwise). Structural matching guarantees the underlying has
-                // a regular `set` here, so forwarding `_instance.X = value` is legal.
-                if (prop.HasSet) sb.AppendLine($"            {(prop.IsInit ? "init" : "set")} => _instance.{prop.Name} = value;");
-                sb.AppendLine("        }");
-            }
-
-            foreach (var idx in proxy.IndexerRequirements)
-            {
-                var parametersStr = string.Join(", ", idx.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {p.Name}"));
-                var argsStr = string.Join(", ", idx.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.Name}"));
-                sb.AppendLine($"        public {idx.TypeFq} this[{parametersStr}]");
-                sb.AppendLine("        {");
-                if (idx.HasGet) sb.AppendLine($"            get => _instance[{argsStr}];");
-                if (idx.HasSet) sb.AppendLine($"            set => _instance[{argsStr}] = value;");
-                sb.AppendLine("        }");
-            }
-
-            foreach (var evt in proxy.EventRequirements)
-            {
-                sb.AppendLine($"        public event {evt.TypeFq} {evt.Name}");
-                sb.AppendLine("        {");
-                sb.AppendLine($"            add => _instance.{evt.Name} += value;");
-                sb.AppendLine($"            remove => _instance.{evt.Name} -= value;");
-                sb.AppendLine("        }");
-            }
+            foreach (var method in proxy.MethodRequirements) EmitProxyMethod(sb, method);
+            foreach (var prop in proxy.PropertyRequirements) EmitProxyProperty(sb, prop);
+            foreach (var idx in proxy.IndexerRequirements) EmitProxyIndexer(sb, idx);
+            foreach (var evt in proxy.EventRequirements) EmitProxyEvent(sb, evt);
 
             sb.AppendLine("    }");
             sb.AppendLine();
+        }
+
+        private static void EmitProxyMethod(StringBuilder sb, MethodSig method)
+        {
+            var typeParams = method.Arity > 0 ? $"<{string.Join(", ", method.TypeParameters)}>" : "";
+            var parametersStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {p.Name}"));
+            var argsStr = string.Join(", ", method.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.Name}"));
+
+            sb.AppendLine($"        public {method.ReturnTypeFq} {method.Name}{typeParams}({parametersStr})");
+            foreach (var constraint in method.Constraints)
+            {
+                if (!string.IsNullOrEmpty(constraint)) sb.AppendLine($"            {constraint}");
+            }
+            sb.AppendLine("        {");
+            sb.AppendLine($"            {ReturnStatement(method.ReturnsVoid, $"_instance.{method.Name}{typeParams}({argsStr})")}");
+            sb.AppendLine("        }");
+        }
+
+        private static void EmitProxyProperty(StringBuilder sb, PropertySig prop)
+        {
+            sb.AppendLine($"        public {prop.TypeFq} {prop.Name}");
+            sb.AppendLine("        {");
+            if (prop.HasGet) sb.AppendLine($"            get => _instance.{prop.Name};");
+            // Match the interface's accessor kind: an `init`-only property must be implemented with
+            // `init` (CS8854 otherwise). Structural matching guarantees the underlying has a regular
+            // `set` here, so forwarding `_instance.X = value` is legal.
+            if (prop.HasSet) sb.AppendLine($"            {(prop.IsInit ? "init" : "set")} => _instance.{prop.Name} = value;");
+            sb.AppendLine("        }");
+        }
+
+        private static void EmitProxyIndexer(StringBuilder sb, IndexerSig idx)
+        {
+            var parametersStr = string.Join(", ", idx.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.TypeFq} {p.Name}"));
+            var argsStr = string.Join(", ", idx.Parameters.Select(p => $"{RefPrefix(p.RefKind)}{p.Name}"));
+            sb.AppendLine($"        public {idx.TypeFq} this[{parametersStr}]");
+            sb.AppendLine("        {");
+            if (idx.HasGet) sb.AppendLine($"            get => _instance[{argsStr}];");
+            if (idx.HasSet) sb.AppendLine($"            set => _instance[{argsStr}] = value;");
+            sb.AppendLine("        }");
+        }
+
+        private static void EmitProxyEvent(StringBuilder sb, EventSig evt)
+        {
+            sb.AppendLine($"        public event {evt.TypeFq} {evt.Name}");
+            sb.AppendLine("        {");
+            sb.AppendLine($"            add => _instance.{evt.Name} += value;");
+            sb.AppendLine($"            remove => _instance.{evt.Name} -= value;");
+            sb.AppendLine("        }");
         }
 
         // ---------------------------------------------------------------------------------------
