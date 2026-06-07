@@ -8,10 +8,12 @@ using NTypeForge.SourceGenerator.Models;
 
 namespace NTypeForge.SourceGenerator
 {
-    // Transform stage (symbol-aware): resolve one invocation into a value-equatable CandidateModel
-    // built entirely from primitives (strings/enums/spans). No ISymbol or SyntaxNode is retained, so
-    // the incremental pipeline does not root the compilation. Returns null for invocations that are
-    // not duck-typing sites.
+    // Transform stage (symbol-aware): detect a duck-typing site in one invocation and resolve it to
+    // a value-equatable CandidateModel built entirely from primitives (strings/enums/spans). No
+    // ISymbol or SyntaxNode is retained, so the incremental pipeline does not root the compilation.
+    // Member analysis is delegated to InterfaceRequirementsAnalyzer / SurfaceAnalyzer / MemberSignatures;
+    // this type owns only the "is this a duck site, and against what types?" decision plus assembly
+    // of the model. Returns null for invocations that are not duck-typing sites.
     internal static class CandidateAnalyzer
     {
         public static CandidateModel? GetCandidate(GeneratorSyntaxContext context)
@@ -167,9 +169,9 @@ namespace NTypeForge.SourceGenerator
             IMethodSymbol? originalMethod,
             bool isUnambiguousDuckSite)
         {
-            var requirements = AnalyzeRequirements(interfaceType);
+            var requirements = InterfaceRequirementsAnalyzer.Analyze(interfaceType);
 
-            var surface = BuildSurfaceCompatKeys(underlyingType);
+            var surface = SurfaceAnalyzer.BuildSurfaceCompatKeys(underlyingType);
             var surfaceSet = new HashSet<string>(surface, StringComparer.Ordinal);
 
             bool isSelfMatch = StructuralMatch.IsSatisfiedBy(
@@ -177,29 +179,29 @@ namespace NTypeForge.SourceGenerator
 
             var originalParams = originalMethod == null
                 ? (IReadOnlyList<ParamSig>)Array.Empty<ParamSig>()
-                : originalMethod.Parameters.Select(ToParamSig).ToList();
+                : originalMethod.Parameters.Select(MemberSignatures.ToParamSig).ToList();
 
             var loc = invocation.GetLocation();
 
             return new CandidateModel(
-                targetFq: Fq(target),
-                targetNamespace: NamespaceOf(target),
-                targetMinimalName: MinimalName(target),
+                targetFq: SymbolNames.Fq(target),
+                targetNamespace: SymbolNames.NamespaceOf(target),
+                targetMinimalName: SymbolNames.MinimalName(target),
                 targetIsInterface: target.TypeKind == TypeKind.Interface,
                 argumentIsInterface: argType.TypeKind == TypeKind.Interface,
-                argumentFq: Fq(argType),
-                underlyingFq: Fq(underlyingType),
-                underlyingNamespace: NamespaceOf(underlyingType),
-                underlyingMinimalName: MinimalName(underlyingType),
+                argumentFq: SymbolNames.Fq(argType),
+                underlyingFq: SymbolNames.Fq(underlyingType),
+                underlyingNamespace: SymbolNames.NamespaceOf(underlyingType),
+                underlyingMinimalName: SymbolNames.MinimalName(underlyingType),
                 underlyingIsInterface: underlyingType.TypeKind == TypeKind.Interface,
-                underlyingBaseDepth: BaseTypeDepth(underlyingType),
-                interfaceFq: Fq(interfaceType),
-                interfaceMinimalName: MinimalName(interfaceType),
+                underlyingBaseDepth: SymbolNames.BaseTypeDepth(underlyingType),
+                interfaceFq: SymbolNames.Fq(interfaceType),
+                interfaceMinimalName: SymbolNames.MinimalName(interfaceType),
                 argumentIndex: argumentIndex,
                 isStatic: isStatic,
                 isDuckCall: isDuckCall,
                 originalMethodName: originalMethod?.Name ?? "",
-                originalReturnTypeFq: originalMethod == null ? "" : Fq(originalMethod.ReturnType),
+                originalReturnTypeFq: originalMethod == null ? "" : SymbolNames.Fq(originalMethod.ReturnType),
                 originalReturnsVoid: originalMethod != null && originalMethod.ReturnType.SpecialType == SpecialType.System_Void,
                 originalParameters: originalParams,
                 methodRequirements: requirements.Methods,
@@ -213,339 +215,6 @@ namespace NTypeForge.SourceGenerator
                 diagFilePath: loc.SourceTree?.FilePath,
                 diagSpan: loc.SourceSpan,
                 diagLineSpan: loc.GetLineSpan().Span);
-        }
-
-        private static ParamSig ToParamSig(IParameterSymbol p)
-            => new ParamSig(Fq(p.Type), p.RefKind, p.Name);
-
-        private static MethodSig ToMethodSig(IMethodSymbol m)
-        {
-            var parameters = m.Parameters.Select(ToParamSig).ToList();
-            var arity = m.Arity;
-
-            string dedupKey, compatKey;
-            if (arity == 0)
-            {
-                // Non-generic: keys are byte-identical to the pre-generics behaviour (Fq-based).
-                dedupKey = $"{m.Name}({ParamSig.Shape(parameters)})";
-                compatKey = $"{Fq(m.ReturnType)} {dedupKey}";
-            }
-            else
-            {
-                // Generic: normalize the method's own type parameters to positional tokens and fold
-                // in constraints. Two structurally identical generic methods then match regardless of
-                // type-parameter names, and a concrete whose constraints differ from the interface
-                // does NOT match (its forwarding call `_instance.M<T>(...)` wouldn't compile).
-                var paramKey = string.Join(",", m.Parameters.Select(p => $"{p.RefKind}:{NormalizeTypeKey(p.Type)}"));
-                dedupKey = $"{m.Name}`{arity}({paramKey}){NormalizeConstraintKey(m.TypeParameters)}";
-                compatKey = $"{NormalizeTypeKey(m.ReturnType)} {dedupKey}";
-            }
-
-            return new MethodSig(
-                m.Name,
-                Fq(m.ReturnType),
-                m.ReturnType.SpecialType == SpecialType.System_Void,
-                parameters,
-                arity,
-                m.TypeParameters.Select(tp => tp.Name).ToList(),
-                m.TypeParameters.Select(GetConstraints).ToList(),
-                dedupKey,
-                compatKey);
-        }
-
-        private static readonly SymbolDisplayFormat FqNoGenerics =
-            SymbolDisplayFormat.FullyQualifiedFormat.WithGenericsOptions(SymbolDisplayGenericsOptions.None);
-
-        // A type rendered for use in a *match key*, with the enclosing method's own type parameters
-        // replaced by positional tokens (``0, ``1, ...) so two generic methods that differ only by
-        // type-parameter name produce the same key. Plain (non-method-type-parameter) types keep
-        // their fully-qualified form, recursing through arrays and constructed generics.
-        private static string NormalizeTypeKey(ITypeSymbol type)
-        {
-            if (type is ITypeParameterSymbol { TypeParameterKind: TypeParameterKind.Method } tp)
-                return $"``{tp.Ordinal}";
-            if (type is IArrayTypeSymbol array)
-                return $"{NormalizeTypeKey(array.ElementType)}[{new string(',', array.Rank - 1)}]";
-            if (type is INamedTypeSymbol { IsGenericType: true } named)
-                return $"{named.ToDisplayString(FqNoGenerics)}<{string.Join(",", named.TypeArguments.Select(NormalizeTypeKey))}>";
-            return Fq(type);
-        }
-
-        // The ordered constraint tokens for one type parameter. `formatType` controls how constraint
-        // types are rendered: Fq for emitted `where` clauses, NormalizeTypeKey for match keys.
-        private static List<string> ConstraintList(ITypeParameterSymbol tp, Func<ITypeSymbol, string> formatType)
-        {
-            var constraints = new List<string>();
-            if (tp.HasReferenceTypeConstraint) constraints.Add("class");
-            if (tp.HasValueTypeConstraint) constraints.Add("struct");
-            if (tp.HasUnmanagedTypeConstraint) constraints.Add("unmanaged");
-            if (tp.HasNotNullConstraint) constraints.Add("notnull");
-            foreach (var t in tp.ConstraintTypes) constraints.Add(formatType(t));
-            if (tp.HasConstructorConstraint) constraints.Add("new()");
-            return constraints;
-        }
-
-        private static string GetConstraints(ITypeParameterSymbol tp)
-        {
-            var constraints = ConstraintList(tp, Fq);
-            return constraints.Count > 0 ? $"where {tp.Name} : {string.Join(", ", constraints)}" : "";
-        }
-
-        private static string NormalizeConstraintKey(IEnumerable<ITypeParameterSymbol> typeParameters)
-        {
-            var parts = new List<string>();
-            foreach (var tp in typeParameters)
-            {
-                var constraints = ConstraintList(tp, NormalizeTypeKey);
-                if (constraints.Count > 0) parts.Add($"`{tp.Ordinal}:{string.Join(",", constraints)}");
-            }
-            return parts.Count > 0 ? $"|{string.Join("|", parts)}" : "";
-        }
-
-        private static PropertySig ToPropertySig(IPropertySymbol p)
-            => new PropertySig(p.Name, Fq(p.Type), p.GetMethod != null, p.SetMethod != null, p.SetMethod is { IsInitOnly: true });
-
-        private static IndexerSig ToIndexerSig(IPropertySymbol p)
-            => new IndexerSig(Fq(p.Type), p.Parameters.Select(ToParamSig).ToList(), p.GetMethod != null, p.SetMethod != null);
-
-        private static EventSig ToEventSig(IEventSymbol e)
-            => new EventSig(e.Name, Fq(e.Type));
-
-        // Walks the interface and all its base interfaces once, bucketing members into the four
-        // proxyable requirement kinds (deduped per kind) and noting the first unsupported member.
-        private static InterfaceRequirements AnalyzeRequirements(ITypeSymbol interfaceType)
-        {
-            var builder = new RequirementsBuilder();
-            foreach (var iface in new[] { interfaceType }.Concat(interfaceType.AllInterfaces))
-            {
-                foreach (var member in iface.GetMembers())
-                {
-                    builder.Observe(member);
-                }
-            }
-            return builder.Build();
-        }
-
-        // The proxyable members an interface (plus its bases) requires, and the first member that
-        // makes it unproxyable (a static abstract member), if any.
-        private readonly struct InterfaceRequirements
-        {
-            public InterfaceRequirements(
-                IReadOnlyList<MethodSig> methods, IReadOnlyList<PropertySig> properties,
-                IReadOnlyList<IndexerSig> indexers, IReadOnlyList<EventSig> events, string? unsupported)
-            {
-                Methods = methods;
-                Properties = properties;
-                Indexers = indexers;
-                Events = events;
-                Unsupported = unsupported;
-            }
-
-            public IReadOnlyList<MethodSig> Methods { get; }
-            public IReadOnlyList<PropertySig> Properties { get; }
-            public IReadOnlyList<IndexerSig> Indexers { get; }
-            public IReadOnlyList<EventSig> Events { get; }
-            public string? Unsupported { get; }
-        }
-
-        // Accumulates the requirement buckets in a single traversal of the interface's members.
-        // Static members are never proxied (a proxy is an instance struct): a static *abstract*
-        // member makes the interface unproxyable (-> Unsupported / NTF002), while a static member
-        // with a default implementation is supplied by the interface itself, so the concrete need
-        // not have it.
-        private sealed class RequirementsBuilder
-        {
-            private readonly List<MethodSig> _methods = new List<MethodSig>();
-            private readonly List<PropertySig> _properties = new List<PropertySig>();
-            private readonly List<IndexerSig> _indexers = new List<IndexerSig>();
-            private readonly List<EventSig> _events = new List<EventSig>();
-            private readonly HashSet<string> _seenMethods = new HashSet<string>(StringComparer.Ordinal);
-            private readonly HashSet<string> _seenEvents = new HashSet<string>(StringComparer.Ordinal);
-            private readonly Dictionary<string, int> _propertyIndex = new Dictionary<string, int>(StringComparer.Ordinal);
-            private readonly Dictionary<string, int> _indexerIndex = new Dictionary<string, int>(StringComparer.Ordinal);
-            private string? _unsupported;
-
-            public void Observe(ISymbol member)
-            {
-                TrackUnsupported(member);
-                if (!member.IsStatic) Bucket(member);
-            }
-
-            public InterfaceRequirements Build()
-                => new InterfaceRequirements(_methods, _properties, _indexers, _events, _unsupported);
-
-            private void TrackUnsupported(ISymbol member)
-            {
-                if (_unsupported != null) return;
-                // Any static abstract member is unproxyable by an instance struct - methods,
-                // properties, events, AND operators/conversions. Accessor methods (get_/set_/add_/
-                // remove_) are skipped; their owning property/event is reported instead.
-                if (member.IsStatic && member.IsAbstract && !IsAccessorMethod(member))
-                {
-                    _unsupported = member.Name;
-                }
-            }
-
-            private void Bucket(ISymbol member)
-            {
-                switch (member)
-                {
-                    case IMethodSymbol { MethodKind: MethodKind.Ordinary } method:
-                        var m = ToMethodSig(method);
-                        if (_seenMethods.Add(m.DedupKey)) _methods.Add(m);
-                        break;
-                    case IPropertySymbol { IsIndexer: true } indexer:
-                        AddOrMergeIndexer(ToIndexerSig(indexer));
-                        break;
-                    case IPropertySymbol prop:
-                        AddOrMergeProperty(ToPropertySig(prop));
-                        break;
-                    case IEventSymbol evt:
-                        var e = ToEventSig(evt);
-                        if (_seenEvents.Add(e.Name)) _events.Add(e);
-                        break;
-                }
-            }
-
-            // A property name can appear across several base interfaces with different accessor sets
-            // (e.g. IGet declares `{ get; }`, IGetSet declares `{ get; set; }`). The interface requires
-            // the UNION of accessors, so merge rather than keep-first - otherwise the proxy omits an
-            // accessor and fails CS0535. Merge is commutative, so the result is order-independent.
-            private void AddOrMergeProperty(PropertySig sig)
-            {
-                if (_propertyIndex.TryGetValue(sig.Name, out var i))
-                {
-                    _properties[i] = MergeProperty(_properties[i], sig);
-                }
-                else
-                {
-                    _propertyIndex[sig.Name] = _properties.Count;
-                    _properties.Add(sig);
-                }
-            }
-
-            private void AddOrMergeIndexer(IndexerSig sig)
-            {
-                if (_indexerIndex.TryGetValue(sig.DedupKey, out var i))
-                {
-                    _indexers[i] = MergeIndexer(_indexers[i], sig);
-                }
-                else
-                {
-                    _indexerIndex[sig.DedupKey] = _indexers.Count;
-                    _indexers.Add(sig);
-                }
-            }
-
-            private static PropertySig MergeProperty(PropertySig a, PropertySig b)
-            {
-                var hasSet = a.HasSet || b.HasSet;
-                // The merged setter is init-only only if every contributing setter is init-only; a
-                // plain `set` in any declaration means the proxy must expose a plain `set`.
-                var hasPlainSet = (a.HasSet && !a.IsInit) || (b.HasSet && !b.IsInit);
-                return new PropertySig(a.Name, a.TypeFq, a.HasGet || b.HasGet, hasSet, hasSet && !hasPlainSet);
-            }
-
-            private static IndexerSig MergeIndexer(IndexerSig a, IndexerSig b)
-                => new IndexerSig(a.TypeFq, a.Parameters, a.HasGet || b.HasGet, a.HasSet || b.HasSet);
-        }
-
-        private static bool IsAccessorMethod(ISymbol member)
-            => member is IMethodSymbol m &&
-               (m.MethodKind == MethodKind.PropertyGet || m.MethodKind == MethodKind.PropertySet ||
-                m.MethodKind == MethodKind.EventAdd || m.MethodKind == MethodKind.EventRemove);
-
-        // CompatKeys of the type's directly-declared members.
-        private static IReadOnlyList<string> BuildSurfaceCompatKeys(ITypeSymbol type)
-        {
-            var result = new List<string>();
-            foreach (var member in type.GetMembers())
-            {
-                result.AddRange(SurfaceKeysForMember(member));
-            }
-            return result.Distinct(StringComparer.Ordinal).ToList();
-        }
-
-        // Every requirement key the member can satisfy on a concrete surface (a member may
-        // satisfy several - e.g. a get/set property also satisfies a get-only requirement).
-        // Only public members count: the proxy forwards `_instance.Member`, which would not
-        // compile against a private/protected/internal member (CS0122/CS0272), so a non-public
-        // member must never make the type appear to structurally match.
-        private static IEnumerable<string> SurfaceKeysForMember(ISymbol member)
-        {
-            switch (member)
-            {
-                case IMethodSymbol { MethodKind: MethodKind.Ordinary, DeclaredAccessibility: Accessibility.Public } method:
-                    return new[] { ToMethodSig(method).CompatKey };
-                case IPropertySymbol { IsIndexer: true } indexer:
-                    return IndexerSurfaceKeys(indexer);
-                case IPropertySymbol prop:
-                    return PropertySurfaceKeys(prop);
-                case IEventSymbol { DeclaredAccessibility: Accessibility.Public } evt:
-                    return new[] { ToEventSig(evt).CompatKey };
-                default:
-                    return Array.Empty<string>();
-            }
-        }
-
-        private static IEnumerable<string> IndexerSurfaceKeys(IPropertySymbol indexer)
-        {
-            var typeFq = Fq(indexer.Type);
-            var parameters = indexer.Parameters.Select(ToParamSig).ToList();
-            var canGet = indexer.GetMethod is { DeclaredAccessibility: Accessibility.Public };
-            var canSet = indexer.SetMethod is { DeclaredAccessibility: Accessibility.Public };
-            if (canGet) yield return IndexerSig.CompatKeyFor(typeFq, parameters, true, false);
-            if (canSet) yield return IndexerSig.CompatKeyFor(typeFq, parameters, false, true);
-            if (canGet && canSet) yield return IndexerSig.CompatKeyFor(typeFq, parameters, true, true);
-        }
-
-        private static IEnumerable<string> PropertySurfaceKeys(IPropertySymbol prop)
-        {
-            var name = prop.Name;
-            var typeFq = Fq(prop.Type);
-            // Each accessor is judged independently: `public int V { get; private set; }` exposes a
-            // public getter but no usable setter, so it satisfies a `{ get; }` requirement but not
-            // `{ get; set; }`.
-            var canGet = prop.GetMethod is { DeclaredAccessibility: Accessibility.Public };
-            // A regular `set` can forward both `set` and `init` requirements; an init-only setter
-            // can forward neither (the proxy wraps an already-constructed instance, so
-            // `_instance.X = value` is illegal - CS8852). Advertise the writable capability only for
-            // a public non-init setter, so an init-only or non-public underlying is treated as
-            // effectively get-only and never matched to a requirement it cannot fulfill.
-            var canSet = prop.SetMethod is { IsInitOnly: false, DeclaredAccessibility: Accessibility.Public };
-            if (canGet) yield return PropertySig.CompatKeyFor(name, typeFq, true, false, false);
-            if (canSet)
-            {
-                yield return PropertySig.CompatKeyFor(name, typeFq, false, true, false);
-                yield return PropertySig.CompatKeyFor(name, typeFq, false, true, true);
-            }
-            if (canGet && canSet)
-            {
-                yield return PropertySig.CompatKeyFor(name, typeFq, true, true, false);
-                yield return PropertySig.CompatKeyFor(name, typeFq, true, true, true);
-            }
-        }
-
-        // ---------------------------------------------------------------------------------------
-        // Symbol display helpers
-        // ---------------------------------------------------------------------------------------
-
-        private static string Fq(ITypeSymbol type)
-            => type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
-
-        private static string MinimalName(ITypeSymbol type)
-            => type.ToDisplayString(SymbolDisplayFormat.MinimallyQualifiedFormat);
-
-        // The namespace a generated artifact for `type` is emitted into (global-namespace types go
-        // to NTypeForge).
-        private static string NamespaceOf(ITypeSymbol type)
-            => type.ContainingNamespace.IsGlobalNamespace ? "NTypeForge" : type.ContainingNamespace.ToDisplayString();
-
-        private static int BaseTypeDepth(ITypeSymbol type)
-        {
-            int depth = 0;
-            for (var b = type.BaseType; b != null; b = b.BaseType) depth++;
-            return depth;
         }
     }
 }
