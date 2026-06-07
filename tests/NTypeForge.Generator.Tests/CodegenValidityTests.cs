@@ -530,4 +530,115 @@ public class CodegenValidityTests
 
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
+
+    // Interface members named `Inner`/`Unwrapped` must not collide with the proxy's own IProxy
+    // members (which are emitted explicitly). Regression for CS0102.
+    [Fact]
+    public void InterfaceMembersNamedInnerAndUnwrapped_EmitCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface I { int Inner(); int Unwrapped { get; } }
+                public class C { public int Inner() => 1; public int Unwrapped => 2; }
+                public class U { public void M() { var x = new C().Duck<I>(); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // An interface member named `_instance` must not collide with the proxy's backing field.
+    [Fact]
+    public void InterfaceMemberNamedLikeBackingField_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface I { int _instance(); }
+                public class C { public int _instance() => 0; }
+                public class U { public void M() { var x = new C().Duck<I>(); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Member, parameter, and type-parameter names that are reserved C# keywords must be escaped.
+    [Fact]
+    public void KeywordIdentifiers_EmitCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface I { int @int(int @class, int @return); void M<@struct>(); }
+                public class C { public int @int(int @class, int @return) => 0; public void M<@struct>() {} }
+                public class U { public void Run() { var x = new C().Duck<I>(); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // An indexer parameter named like a keyword (or `value`) is hazardous; the proxy renames
+    // indexer parameters positionally, so any name is safe.
+    [Fact]
+    public void IndexerWithKeywordParameter_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface I { string this[int @int] { get; set; } }
+                public class C { public string this[int @int] { get => ""; set {} } }
+                public class U { public void M() { var x = new C().Duck<I>(); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A forwarding (implicit-duck) method whose passthrough parameters are named like the generated
+    // extension receiver (`target`) or unwrap locals (`c_0`) must not collide. Regression for CS0136.
+    [Fact]
+    public void ForwardingParametersNamedLikeGeneratedIdentifiers_EmitCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IShape { int Area(); }
+                public class Circle { public int Area() => 1; }
+                public class Canvas
+                {
+                    public int Draw(IShape s, int target, int c_0) => s.Area() + target + c_0;
+                    public void M() { var c = new Canvas(); c.Draw(new Circle(), 1, 2); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A type that satisfies the target interface only via variance (ICovariant<string> is-a
+    // ICovariant<object>) needs no proxy and must not be reported as a non-match.
+    [Fact]
+    public void VarianceSatisfiedInterface_EmitsCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICov<out TOut> { TOut Get(); }
+                public class StrBox : ICov<string> { public string Get() => ""; }
+                public class U { public void M() { var x = new StrBox().Duck<ICov<object>>(); } }
+            }
+            """;
+
+        Assert.False(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
 }

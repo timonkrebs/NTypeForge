@@ -160,4 +160,49 @@ public class MemberDuckingRuntimeTests
 
         Assert.Same(instance, view);
     }
+
+    public interface IThing { int Inner(); }
+
+    public class Thing { public int Inner() => 42; }
+
+    // An interface member named `Inner` is forwarded correctly, and the proxy still unboxes (its
+    // IProxy<T>.Inner is implemented explicitly, so it doesn't clash).
+    [Fact]
+    public void InterfaceMemberNamedInner_ForwardsAndStillUnboxes()
+    {
+        var thing = new Thing();
+        IThing view = thing.Duck<IThing>();
+
+        Assert.Equal(42, view.Inner());
+        Assert.Same(thing, view.Unbox<Thing>());
+    }
+
+    public interface IKeyword { int @int(int @return); }
+
+    public class KeywordImpl { public int @int(int @return) => @return + 1; }
+
+    // A method and parameter named with reserved keywords are forwarded correctly.
+    [Fact]
+    public void KeywordNamedMembers_InvokeThroughProxy()
+    {
+        IKeyword view = new KeywordImpl().Duck<IKeyword>();
+
+        Assert.Equal(6, view.@int(5));
+    }
+
+    public interface ICovariant<out T> { T Get(); }
+
+    public class StringBox : ICovariant<string> { public string Get() => "hi"; }
+
+    // A type that satisfies the interface via covariance needs no proxy - the same instance comes
+    // back.
+    [Fact]
+    public void VarianceSatisfiedInterface_ReturnsSameInstance()
+    {
+        var box = new StringBox();
+
+        ICovariant<object> view = box.Duck<ICovariant<object>>();
+
+        Assert.Same(box, view);
+    }
 }

@@ -374,4 +374,61 @@ public class DiagnosticTests
         Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
+
+    // A by-ref return cannot be forwarded by the proxy; the interface is unproxyable. NTF002, not
+    // broken generated code (CS0535).
+    [Fact]
+    public void NTF002_WhenInterfaceMethodReturnsByRef()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface I { ref int Get(); }
+                public class C { int _x; public ref int Get() => ref _x; }
+                public class U { public void M() { var x = new C().Duck<I>(); } }
+            }
+            """;
+
+        Assert.True(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A pointer-typed member makes the interface unproxyable (the generated struct is not unsafe).
+    // The generator must report NTF002 and emit no proxy (the user's own unsafe declarations need
+    // /unsafe, but the generator must not add to the breakage).
+    [Fact]
+    public void NTF002_WhenInterfaceMemberInvolvesPointer()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public unsafe interface I { int* Get(); }
+                public unsafe class C { public int* Get() => null; }
+                public class U { public void M() { var x = new C().Duck<I>(); } }
+            }
+            """;
+
+        Assert.True(GeneratorTestHarness.GetGeneratorDiagnostics(source).HasDiagnostic("NTF002"));
+    }
+
+    // A concrete whose matching member is `static` cannot back an instance proxy (CS0176); static
+    // members must not count toward the surface, so this is a clean NTF001.
+    [Fact]
+    public void NTF001_WhenConcreteMemberIsStatic()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface I { string Greet(); }
+                public class C { public static string Greet() => "hi"; }
+                public class U { public void M() { var x = new C().Duck<I>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
 }

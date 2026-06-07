@@ -1,10 +1,17 @@
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 
 namespace NTypeForge.SourceGenerator
 {
     // Pure ITypeSymbol -> string naming helpers used across the analysis stage.
     internal static class SymbolNames
     {
+        // Prefix a user-derived identifier with `@` when it is a reserved C# keyword (a member or
+        // parameter literally named `int`, `event`, `return`, ...). Symbol.Name returns the bare
+        // word, so the generated code would not parse without this.
+        public static string Escape(string identifier)
+            => SyntaxFacts.GetKeywordKind(identifier) != SyntaxKind.None ? "@" + identifier : identifier;
+
         public static string Fq(ITypeSymbol type)
             => type.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat);
 

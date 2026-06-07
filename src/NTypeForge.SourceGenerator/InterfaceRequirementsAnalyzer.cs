@@ -51,6 +51,34 @@ namespace NTypeForge.SourceGenerator
                (m.MethodKind == MethodKind.PropertyGet || m.MethodKind == MethodKind.PropertySet ||
                 m.MethodKind == MethodKind.EventAdd || m.MethodKind == MethodKind.EventRemove);
 
+        // A member NTypeForge cannot proxy: a static abstract member (an instance struct can't
+        // implement it); a by-ref return (the forwarding proxy would have to re-ref); or a member
+        // whose signature involves a pointer / function-pointer type (the generated struct is not
+        // `unsafe`). Accessor methods are judged via their owning property/event.
+        private static bool IsUnproxyable(ISymbol member)
+        {
+            if (member.IsStatic) return member.IsAbstract;
+            return ReturnsByRef(member) || InvolvesPointer(member);
+        }
+
+        private static bool ReturnsByRef(ISymbol member)
+            => (member is IMethodSymbol m && m.RefKind != RefKind.None)
+               || (member is IPropertySymbol p && p.RefKind != RefKind.None);
+
+        private static bool InvolvesPointer(ISymbol member)
+        {
+            switch (member)
+            {
+                case IMethodSymbol m: return IsPointer(m.ReturnType) || m.Parameters.Any(x => IsPointer(x.Type));
+                case IPropertySymbol p: return IsPointer(p.Type) || p.Parameters.Any(x => IsPointer(x.Type));
+                case IEventSymbol e: return IsPointer(e.Type);
+                default: return false;
+            }
+        }
+
+        private static bool IsPointer(ITypeSymbol type)
+            => type.TypeKind == TypeKind.Pointer || type.TypeKind == TypeKind.FunctionPointer;
+
         // Accumulates the requirement buckets in a single traversal of the interface's members.
         // Static members are never proxied (a proxy is an instance struct): a static *abstract*
         // member makes the interface unproxyable (-> Unsupported / NTF002), while a static member
@@ -80,13 +108,9 @@ namespace NTypeForge.SourceGenerator
             private void TrackUnsupported(ISymbol member)
             {
                 if (_unsupported != null) return;
-                // Any static abstract member is unproxyable by an instance struct - methods,
-                // properties, events, AND operators/conversions. Accessor methods (get_/set_/add_/
-                // remove_) are skipped; their owning property/event is reported instead.
-                if (member.IsStatic && member.IsAbstract && !IsAccessorMethod(member))
-                {
-                    _unsupported = member.Name;
-                }
+                // Accessor methods (get_/set_/add_/remove_) are reported via their owning member.
+                if (IsAccessorMethod(member)) return;
+                if (IsUnproxyable(member)) _unsupported = member.Name;
             }
 
             private void Bucket(ISymbol member)

@@ -43,7 +43,7 @@ namespace NTypeForge.SourceGenerator
                 m.ReturnType.SpecialType == SpecialType.System_Void,
                 parameters,
                 arity,
-                m.TypeParameters.Select(tp => tp.Name).ToList(),
+                m.TypeParameters.Select(tp => SymbolNames.Escape(tp.Name)).ToList(),
                 m.TypeParameters.Select(GetConstraints).ToList(),
                 dedupKey,
                 compatKey);
@@ -93,7 +93,7 @@ namespace NTypeForge.SourceGenerator
         private static string GetConstraints(ITypeParameterSymbol tp)
         {
             var constraints = ConstraintList(tp, SymbolNames.Fq);
-            return constraints.Count > 0 ? $"where {tp.Name} : {string.Join(", ", constraints)}" : "";
+            return constraints.Count > 0 ? $"where {SymbolNames.Escape(tp.Name)} : {string.Join(", ", constraints)}" : "";
         }
 
         private static string NormalizeConstraintKey(IEnumerable<ITypeParameterSymbol> typeParameters)

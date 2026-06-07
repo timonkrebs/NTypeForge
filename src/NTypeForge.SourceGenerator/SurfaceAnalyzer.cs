@@ -27,15 +27,18 @@ namespace NTypeForge.SourceGenerator
         // member must never make the type appear to structurally match.
         private static IEnumerable<string> SurfaceKeysForMember(ISymbol member)
         {
+            // Static members are excluded: a proxy forwards `_instance.Member`, which does not
+            // compile against a static member (CS0176). The requirement side excludes statics too,
+            // so a static member must never make a type appear to structurally match.
             switch (member)
             {
-                case IMethodSymbol { MethodKind: MethodKind.Ordinary, DeclaredAccessibility: Accessibility.Public } method:
+                case IMethodSymbol { MethodKind: MethodKind.Ordinary, DeclaredAccessibility: Accessibility.Public, IsStatic: false } method:
                     return new[] { MemberSignatures.ToMethodSig(method).CompatKey };
-                case IPropertySymbol { IsIndexer: true } indexer:
+                case IPropertySymbol { IsIndexer: true, IsStatic: false } indexer:
                     return IndexerSurfaceKeys(indexer);
-                case IPropertySymbol prop:
+                case IPropertySymbol { IsStatic: false } prop:
                     return PropertySurfaceKeys(prop);
-                case IEventSymbol { DeclaredAccessibility: Accessibility.Public } evt:
+                case IEventSymbol { DeclaredAccessibility: Accessibility.Public, IsStatic: false } evt:
                     return new[] { MemberSignatures.ToEventSig(evt).CompatKey };
                 default:
                     return Array.Empty<string>();
