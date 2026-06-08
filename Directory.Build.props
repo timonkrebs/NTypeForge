@@ -29,7 +29,7 @@
   <ItemGroup Condition="'$(MeasureCognitiveComplexity)' == 'true'">
     <!-- Pinned, not `*`: a floating analyzer version can change S3776 scoring and break CI with no
          code change. Bump deliberately. -->
-    <PackageReference Include="SonarAnalyzer.CSharp" Version="10.27.0.140913">
+    <PackageReference Include="SonarAnalyzer.CSharp">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
