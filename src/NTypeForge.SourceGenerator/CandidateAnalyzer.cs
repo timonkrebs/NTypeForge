@@ -132,7 +132,7 @@ namespace NTypeForge.SourceGenerator
             if (AlreadyImplements(semanticModel, argType, targetInterface)) return null;
 
             return BuildModel(
-                invocation, target: argType, argType: argType, underlyingType: underlyingType,
+                invocation, semanticModel, target: argType, argType: argType, underlyingType: underlyingType,
                 interfaceType: targetInterface, argumentIndex: 0, isStatic: false, isDuckCall: true,
                 originalMethod: null);
         }
@@ -192,7 +192,7 @@ namespace NTypeForge.SourceGenerator
                 return null;
 
             return BuildModel(
-                invocation, target: target, argType: argType,
+                invocation, semanticModel, target: target, argType: argType,
                 underlyingType: underlyingType, interfaceType: candidate.Parameters[paramIndex].Type,
                 argumentIndex: EmittedParameterIndex(candidate, paramIndex),
                 isStatic: candidate.IsStatic && !IsExtensionLike(candidate),
@@ -384,8 +384,20 @@ namespace NTypeForge.SourceGenerator
             }
         }
 
+        private sealed class AnalysisCache
+        {
+            public readonly System.Collections.Concurrent.ConcurrentDictionary<ITypeSymbol, InterfaceRequirements> Interfaces =
+                new System.Collections.Concurrent.ConcurrentDictionary<ITypeSymbol, InterfaceRequirements>(SymbolEqualityComparer.Default);
+            public readonly System.Collections.Concurrent.ConcurrentDictionary<ITypeSymbol, (IReadOnlyList<string> Keys, HashSet<string> Set)> Surfaces =
+                new System.Collections.Concurrent.ConcurrentDictionary<ITypeSymbol, (IReadOnlyList<string>, HashSet<string>)>(SymbolEqualityComparer.Default);
+        }
+
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, AnalysisCache> CompilationCaches =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, AnalysisCache>();
+
         private static CandidateModel BuildModel(
             InvocationExpressionSyntax invocation,
+            SemanticModel semanticModel,
             ITypeSymbol target,
             ITypeSymbol argType,
             ITypeSymbol underlyingType,
@@ -395,13 +407,22 @@ namespace NTypeForge.SourceGenerator
             bool isDuckCall,
             IMethodSymbol? originalMethod)
         {
-            var requirements = InterfaceRequirementsAnalyzer.Analyze(interfaceType);
+            var cache = CompilationCaches.GetOrCreateValue(semanticModel.Compilation);
 
-            var surface = SurfaceAnalyzer.BuildSurfaceCompatKeys(underlyingType);
-            var surfaceSet = new HashSet<string>(surface, StringComparer.Ordinal);
+            var requirements = cache.Interfaces.GetOrAdd(
+                interfaceType,
+                t => InterfaceRequirementsAnalyzer.Analyze(t));
+
+            var surfaceData = cache.Surfaces.GetOrAdd(
+                underlyingType,
+                t =>
+                {
+                    var keys = SurfaceAnalyzer.BuildSurfaceCompatKeys(t);
+                    return (keys, new HashSet<string>(keys, StringComparer.Ordinal));
+                });
 
             bool isSelfMatch = StructuralMatch.IsSatisfiedBy(
-                requirements.Methods, requirements.Properties, requirements.Indexers, requirements.Events, surfaceSet);
+                requirements.Methods, requirements.Properties, requirements.Indexers, requirements.Events, surfaceData.Set);
 
             var originalDefinition = originalMethod == null ? null : OriginalExtensionDefinition(originalMethod);
             var unconstructedMethod = originalDefinition?.OriginalDefinition;
@@ -443,7 +464,7 @@ namespace NTypeForge.SourceGenerator
                 propertyRequirements: requirements.Properties,
                 indexerRequirements: requirements.Indexers,
                 eventRequirements: requirements.Events,
-                underlyingSurfaceCompatKeys: surface,
+                underlyingSurfaceCompatKeys: surfaceData.Keys,
                 isSelfMatch: isSelfMatch,
                 unsupportedMemberName: requirements.Unsupported,
                 diagFilePath: loc.SourceTree?.FilePath,
