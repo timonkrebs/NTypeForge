@@ -12,4 +12,7 @@
     <Project Path="tests/NTypeForge.Tests/NTypeForge.Tests.csproj" />
     <Project Path="tests/NTypeForge.Generator.Tests/NTypeForge.Generator.Tests.csproj" />
   </Folder>
+  <Folder Name="/bench/">
+    <Project Path="bench/NTypeForge.Benchmarks/NTypeForge.Benchmarks.csproj" />
+  </Folder>
 </Solution>

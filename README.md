@@ -22,11 +22,14 @@ reflection, no runtime type inspection, no hand-written adapters.
   - [1. Pass a structurally-matching type to a method](#1-pass-a-structurally-matching-type-to-a-method)
   - [2. Create a proxy explicitly with `Duck<T>()`](#2-create-a-proxy-explicitly-with-duckt)
   - [3. Get the original instance back](#3-get-the-original-instance-back)
-- [Advanced types](#advanced-types)
+- [Supported members](#supported-members)
 - [How it works](#how-it-works)
-- [Performance & overhead](#performance--overhead)
+- [Runtime overhead](#runtime-overhead)
+- [Compile-time implications](#compile-time-implications)
 - [Limitations](#limitations)
 - [Diagnostics](#diagnostics)
+- [Development](#development)
+- [About](#about)
 
 ---
 
@@ -155,6 +158,11 @@ float result = asInterface.Calculate(10, 20); // 30
 If the type doesn't structurally match `T`, you get a clear compile-time error
 ([NTF001](#diagnostics)) instead of a runtime surprise.
 
+If the instance *already* satisfies `T` — nominally or through variance — no proxy is
+generated at all: `Duck<T>()` hands back the same instance unchanged (so
+`asInterface is IProxy<T>` is `false`). A proxy is created only when one is actually
+needed to bridge the gap.
+
 ### 3. Get the original instance back
 
 Every generated proxy implements `IProxy<T>`, so you can always recover the wrapped
@@ -176,43 +184,66 @@ if (proxy is IProxy<MyMath> p)
 
 NTypeForge also **prevents double-wrapping**: if you pass an existing proxy where a
 *different* interface is expected, it unwraps to the original instance and re-wraps
-once, rather than stacking a proxy on top of a proxy.
+once, rather than stacking a proxy on top of a proxy. This applies when the proxy's
+underlying concrete type is known to the current compilation (the common case — it was
+ducked in the same assembly). A proxy created in *another* assembly may get
+double-wrapped, but `Unbox<T>()` / `TryUnbox<T>()` still walk the whole chain back to
+the original instance — only a single-level `IProxy<T>.Inner` would observe the
+intermediate proxy.
 
 ---
 
-## Advanced types
+## Supported members
 
-The generator preserves full signature fidelity, including value types and
-parameter-passing modifiers.
+The generator proxies the full range of interface members, preserving signature
+fidelity including value types and parameter-passing modifiers.
 
-- ✅ `class`, `struct`, and `record` arguments
-- ✅ `ref`, `out`, and `in` parameters
-- ✅ Custom types as parameters and return values
-- ✅ Interfaces that inherit from other interfaces (all inherited methods are proxied)
+| Member kind | Supported |
+| --- | --- |
+| Methods (incl. `ref`/`out`/`in` params, custom types) | ✅ |
+| Properties (get/set, get-only, `init`-only, write-only) | ✅ |
+| Indexers (single- and multi-parameter) | ✅ |
+| Events | ✅ |
+| Generic methods (incl. constraints, multiple type parameters) | ✅ |
+| Interfaces inheriting from other interfaces (all inherited members proxied) | ✅ |
+| `class`, `struct`, and `record` arguments | ✅ |
 
 ```cs
 public struct Point { public int X, Y; }
 
-public interface IGeometry
+public interface IWidget
 {
-    void Move(ref Point point, int dx, int dy);
-    void SetOrigin(out Point point);
+    string Title { get; set; }            // property
+    int this[int index] { get; }          // indexer
+    event Action? Clicked;                // event
+    void Move(ref Point point, int dx);   // ref/out/in preserved
+    T Echo<T>(T value) where T : class;   // generic method
 }
 
-public class MyGeometry // does not implement IGeometry
+public class MyWidget // does not implement IWidget
 {
-    public void Move(ref Point point, int dx, int dy) { /* ... */ }
-    public void SetOrigin(out Point point)            { point = default; }
+    public string Title { get; set; } = "";
+    public int this[int index] => index * 2;
+    public event Action? Clicked;
+    public void Move(ref Point point, int dx) { /* ... */ }
+    public T Echo<T>(T value) where T : class => value;
 }
 
-public class GeometryManager
-{
-    public void Transform(IGeometry geometry) { /* ... */ }
-}
-
-var manager = new GeometryManager();
-manager.Transform(new MyGeometry()); // ✅ ref/out semantics preserved
+IWidget widget = new MyWidget().Duck<IWidget>(); // ✅ every member is forwarded
 ```
+
+**Accessor fidelity.** Each property/indexer accessor is matched independently and
+forwarded with the interface's accessor kind. A `public int V { get; private set; }`
+satisfies a `{ get; }` interface but not `{ get; set; }` (the private setter isn't
+callable). An `init`-only interface property is implemented with `init` — and an
+`init`-only *underlying* member is treated as get-only, since the proxy wraps an
+already-constructed instance and could never assign it.
+
+**Inherited members.** A concrete type satisfies a requirement with a matching public
+instance member whether it *declares* that member or *inherits* it from a base
+`class` — the proxy forwards inherited members just fine. (On the interface side,
+likewise, a target interface requires every member it inherits from its base
+interfaces.)
 
 ---
 
@@ -226,23 +257,31 @@ The generator is an `IIncrementalGenerator`. It scans for two things:
 
 For each match it emits two pieces of code:
 
-**A proxy struct** that implements the target interface by forwarding to the wrapped
-instance, plus `IProxy<T>` so the instance can be recovered:
+**A proxy class** that implements the target interface by forwarding to the wrapped
+instance, plus `IProxy<T>` so the instance can be recovered. `IProxy` is implemented
+*explicitly*, so it never collides with an interface member that happens to be named
+`Inner` or `Unwrapped` (the real type name also carries a stable hash suffix for
+uniqueness, elided here):
 
 ```cs
-internal readonly struct AddCalculator_ICalculator_Proxy
+internal sealed class AddCalculator_ICalculator_Proxy
     : ICalculator, IProxy<AddCalculator>
 {
-    private readonly AddCalculator _instance;
+    // Not readonly: a struct underlying must stay mutable so settable members work.
+    private AddCalculator __ntf_instance;
 
-    public AddCalculator_ICalculator_Proxy(AddCalculator instance) => _instance = instance;
+    public AddCalculator_ICalculator_Proxy(AddCalculator instance) => __ntf_instance = instance;
 
-    public AddCalculator Inner    => _instance;     // from IProxy<AddCalculator>
-    object IProxy.Unwrapped       => _instance;     // from IProxy
+    AddCalculator IProxy<AddCalculator>.Inner => __ntf_instance;  // from IProxy<AddCalculator>
+    object IProxy.Unwrapped                   => __ntf_instance;  // from IProxy
 
-    public float Calculate(float a, float b) => _instance.Calculate(a, b);
+    public float Calculate(float a, float b) => __ntf_instance.Calculate(a, b);
 }
 ```
+
+It's a `class`, not a `struct`: a struct proxy would be boxed the instant it's passed
+as the interface (allocating anyway), and a *readonly* field would make a `struct`
+underlying impossible to mutate — see [Runtime overhead](#runtime-overhead).
 
 **A C# 14 extension member** that accepts the concrete type and forwards into the
 original method, wrapping the argument in the proxy:
@@ -258,40 +297,106 @@ public static class CalculatorManager_DuckTypingExtensions
 }
 ```
 
+The names above are simplified: the real proxy and extension-class names carry a
+stable hash suffix for uniqueness. And when the ducked argument's static type is an
+*interface* (rather than a concrete type as here), the forwarding method first emits
+`TryUnbox` branches to unwrap an existing proxy before re-wrapping it.
+
 The generated pipeline is fully cacheable: each call site is reduced to a
 value-equatable model (strings/enums only — no symbols held), so edits that don't
 change any duck-typing site skip regeneration.
 
 ---
 
-## Performance & overhead
+## Runtime overhead
 
 NTypeForge avoids the usual cost of dynamic duck typing — **no reflection, no
 `DynamicObject`, no expression-tree compilation, no per-call dispatch setup.** A
-forwarding call is a direct method call through a one-field struct.
+forwarding call is a direct method call through a one-field proxy.
 
-It is **not** strictly zero-allocation, though. The proxy is a `struct`, but the
-moment it's passed where the target interface is expected, it gets **boxed once**
-(a single small heap allocation per call). The win is structural: you pay one box,
-not a reflection pipeline — and you keep full compile-time type checking.
+It is **not** zero-allocation, though. The proxy is a small `class` — an object header
+plus a single field referencing the wrapped instance (for a `struct` underlying the
+value is copied inline into that field). Each *duck conversion* therefore costs **one
+heap allocation**: one per implicit-forwarding call site, or one per `Duck<T>()` call.
+Calls made *on* an already-created proxy are allocation-free direct forwards. The win
+is structural: you pay one tiny object, not a reflection pipeline — and you keep full
+compile-time type checking. (An earlier design used a `struct` proxy, but it was boxed
+the instant it was passed as the interface — so it allocated anyway, while making a
+*struct* underlying impossible to proxy correctly.)
+
+## Compile-time implications
+
+NTypeForge does its work *during compilation*, so the cost it adds is a
+**build-time** cost, not a runtime one. There are two parts: (1) running the
+generator, and (2) the compiler then having to bind and emit the code it produced.
+
+The table below compiles one fixed program three ways. The source is **identical**
+across all rows — it uses `Duck<T>()`, which binds to the [runtime
+fallback](src/NTypeForge/DuckExtensions.cs) when the generator is absent and to a
+generated proxy when it is present — so the only variable is whether NTypeForge
+participates. `Sites` is the number of distinct `Duck<T>()` call sites (each adds
+one interface, one class, one generated proxy, and one generated extension).
+
+| Phase | 10 sites | 50 sites | 100 sites |
+| --- | ---: | ---: | ---: |
+| Compile only — **NTypeForge OFF** (baseline) | 16 ms | 78 ms | 106 ms |
+| Generator pass only (no emit) | 7 ms | 183 ms | 577 ms |
+| Full compile — **NTypeForge ON** | 461 ms | 2,341 ms | 4,875 ms |
+
+<sub>BenchmarkDotNet 0.14.0, .NET 10.0.4, Roslyn 5.0.0, in a 2-core (1 physical) Linux container — a deliberately
+constrained box, so treat the **absolute** numbers as worst-case and the **shape** as the takeaway.
+`ShortRun` (3 iterations); small-`Sites` rows are noisy. Reproduce with
+`dotnet run -c Release --project bench/NTypeForge.Benchmarks`.</sub>
+
+**What this shows:**
+
+- **Running the generator is cheap** (~6 ms per site). It resolves each call site
+  into a small value-equatable model and emits text; that is the small middle row.
+- **Compiling the generated code dominates.** Most of the "ON" time is the compiler
+  binding and emitting the generated proxies and — chiefly — the C# 14 `extension`
+  blocks, which are a preview feature that isn't optimized yet. On this hardware
+  that is roughly **40 ms of added compile time per duck-typing site**, scaling
+  about **linearly** with the number of sites.
+- So a handful of duck sites is negligible; **heavy, pervasive use** (hundreds of
+  sites) adds noticeable seconds to a *clean* build. As the `extension`-member
+  feature matures toward release, this cost should fall.
+
+**Incrementality.** The generator pipeline is fully cacheable: each call site is
+reduced to a value-equatable model holding no symbols, so on an edit that doesn't
+change any duck-typing site the generator's transform is reused and the IDE stays
+responsive. Caching reuses the generator *output*; it does not remove the compiler's
+cost of binding that output on a rebuild.
 
 ---
 
 ## Limitations
 
-NTypeForge proxies **non-generic methods only**. The following interface members are
-**not** supported and will prevent a proxy from being generated:
+- **Public members only.** Structural matching counts a type's **public** members.
+  A `private`/`protected`/`internal` member (or accessor) can't be forwarded by the
+  proxy, so it never counts toward a match.
+- **Some interface members can't be proxied.** A `static abstract` member can't be
+  implemented by an instance proxy, so such an interface can't be proxied (a `static`
+  member *with* a default implementation is fine — it's supplied by the interface
+  itself). The same goes for a member that returns *by `ref`*, or whose signature
+  involves a *pointer* / *function-pointer* type. Note this is the `ref`-**return**
+  case: `ref`/`out`/`in` **parameters** are fully supported. On a `Duck<T>()` call any
+  of these reports [NTF002](#diagnostics).
+- **`init`-only underlying members are effectively read-only.** A proxy wraps an
+  already-constructed instance, so it can satisfy a settable interface requirement
+  only when the underlying setter is a regular `set`.
+- **`struct` underlyings are wrapped by value.** A proxy over a struct holds a
+  *copy* of it, so mutations made through the proxy are visible on the proxy but do
+  **not** propagate back to the original variable (ordinary C# value semantics).
+  State stays consistent for the proxy's own lifetime.
+- **`ref struct` underlyings are not supported.** A `ref struct` can't be wrapped by
+  the proxy (it can't be a field of the proxy, a type argument, or boxed), so such a
+  site is left alone and the compiler's own error stands.
 
-- ❌ Properties and indexers
-- ❌ Events
-- ❌ Generic methods
-
-An explicit `Duck<T>()` against such an interface reports
-[NTF002](#diagnostics); an implicit call is simply left as the original (still
-failing) call so the compiler's own error stands.
-
-Structural matching considers a type's **directly declared** methods — members it
-inherits from a base *class* are not counted toward the match.
+When `Duck<T>()` targets an interface with an unsupported member it reports
+[NTF002](#diagnostics). An implicit (non-`Duck`) call is left as the original
+(still-failing) call so the compiler's own error stands — except at a
+high-confidence near-miss, where it emits the [NTF003](#diagnostics) warning to
+explain why duck typing didn't kick in.
 
 ---
 
@@ -300,7 +405,43 @@ inherits from a base *class* are not counted toward the match.
 | ID | Severity | Meaning |
 | --- | --- | --- |
 | **NTF001** | Error | `Duck<T>()` was used but the type does not structurally implement every member required by `T`. |
-| **NTF002** | Error | The target interface contains a member NTypeForge cannot proxy (a property, event, or generic method). |
+| **NTF002** | Error | A `Duck<T>()` target interface contains a member NTypeForge cannot proxy (e.g. a `static abstract` member). |
+| **NTF003** | Warning | An implicit call's argument structurally matches the parameter interface *except* for an unsupported member, so NTypeForge couldn't bridge it — surfaced to explain why the call still fails, without masking the compiler's own error. |
+
+---
+
+## Development
+
+Build and test with the standard SDK commands against `NTypeForge.slnx`:
+
+```bash
+dotnet build
+dotnet test
+```
+
+### Cognitive Complexity gate
+
+The repo ships an **opt-in** [SonarSource Cognitive Complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf)
+check (rule `S3776`, per-method threshold **15**). Normal builds are unaffected; to
+measure it locally:
+
+```bash
+dotnet build -p:MeasureCognitiveComplexity=true
+```
+
+This enables `SonarAnalyzer.CSharp` with only `S3776` (see
+[`Directory.Build.props`](Directory.Build.props) and [`SonarLint.xml`](SonarLint.xml)).
+CI runs it as a separate `cognitive-complexity` job that escalates the warning to an
+error, so any method above 15 fails the build.
+
+### Benchmarks
+
+[`bench/NTypeForge.Benchmarks`](bench/NTypeForge.Benchmarks) measures the compile-time
+cost reported above:
+
+```bash
+dotnet run -c Release --project bench/NTypeForge.Benchmarks
+```
 
 ---
 

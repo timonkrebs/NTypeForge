@@ -67,6 +67,7 @@ public interface IGeometryCalculator
     PointStruct Move(PointStruct point, int dx, int dy);
     void MoveRef(ref PointStruct point, int dx, int dy);
     void CreateOrigin(out PointStruct point);
+    int SumComponents(in PointStruct point);
 }
 
 public class GeometryHandler
@@ -86,6 +87,8 @@ public class GeometryHandler
     {
         point = new PointStruct { X = 0, Y = 0 };
     }
+
+    public int SumComponents(in PointStruct point) => point.X + point.Y;
 }
 
 public class GeometryManager
@@ -103,6 +106,11 @@ public class GeometryManager
     public void HandleCreateOrigin(IGeometryCalculator calculator, out PointStruct point)
     {
         calculator.CreateOrigin(out point);
+    }
+
+    public int HandleSumComponents(IGeometryCalculator calculator, in PointStruct point)
+    {
+        return calculator.SumComponents(in point);
     }
 }
 
@@ -168,5 +176,20 @@ public class DuckTypingAdvancedTests
 
         Assert.Equal(0, point.X);
         Assert.Equal(0, point.Y);
+    }
+
+    // A plain `in` parameter (RefKind.In) is distinct from `ref readonly`: the proxy must reproduce
+    // the `in` modifier on the interface method and forward it through. Exercised end-to-end via
+    // implicit method-argument ducking (the proxy wraps the handler) plus a real call.
+    [Fact]
+    public void CanDuckTypeWithStructInParameters()
+    {
+        var handler = new GeometryHandler();
+        var manager = new GeometryManager();
+
+        var point = new PointStruct { X = 3, Y = 4 };
+        var sum = manager.HandleSumComponents(handler, in point);
+
+        Assert.Equal(7, sum);
     }
 }
