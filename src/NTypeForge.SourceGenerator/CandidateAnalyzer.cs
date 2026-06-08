@@ -292,10 +292,10 @@ namespace NTypeForge.SourceGenerator
 
             if (argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
 
-            var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
-            if (conversion.Exists && conversion.IsImplicit) return false;
+            if (!IsProxyableKind(GetUnderlyingType(argType))) return false;
 
-            return IsProxyableKind(GetUnderlyingType(argType));
+            var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
+            return !(conversion.Exists && conversion.IsImplicit);
         }
 
         private static bool TryMapArgumentsToParameters(
