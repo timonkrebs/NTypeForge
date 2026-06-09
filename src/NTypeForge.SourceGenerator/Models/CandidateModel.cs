@@ -18,6 +18,7 @@ namespace NTypeForge.SourceGenerator.Models
         public string TargetNamespace { get; }
         public string TargetMinimalName { get; }
         public bool TargetIsInterface { get; }
+        public bool TargetIsPublic { get; }
 
         // Static type of the ducked argument (only meaningful for method-argument ducking).
         public bool ArgumentIsInterface { get; }
@@ -77,7 +78,7 @@ namespace NTypeForge.SourceGenerator.Models
         public string Key { get; }
 
         public CandidateModel(
-            string targetFq, string targetNamespace, string targetMinimalName, bool targetIsInterface,
+            string targetFq, string targetNamespace, string targetMinimalName, bool targetIsInterface, bool targetIsPublic,
             bool argumentIsInterface, string argumentFq,
             string underlyingFq, string underlyingNamespace, string underlyingMinimalName, bool underlyingIsInterface, int underlyingBaseDepth,
             string interfaceFq, string interfaceMinimalName,
@@ -97,6 +98,7 @@ namespace NTypeForge.SourceGenerator.Models
             TargetNamespace = targetNamespace;
             TargetMinimalName = targetMinimalName;
             TargetIsInterface = targetIsInterface;
+            TargetIsPublic = targetIsPublic;
             ArgumentIsInterface = argumentIsInterface;
             ArgumentFq = argumentFq;
             UnderlyingFq = underlyingFq;
@@ -142,7 +144,7 @@ namespace NTypeForge.SourceGenerator.Models
             var evts = string.Join(",", EventRequirements.Select(e => e.CompatKey));
             var surface = string.Join(",", UnderlyingSurfaceCompatKeys);
             return string.Join("|",
-                TargetFq, TargetIsInterface, ArgumentFq, ArgumentIsInterface,
+                TargetFq, TargetIsInterface, TargetIsPublic, ArgumentFq, ArgumentIsInterface,
                 UnderlyingFq, UnderlyingIsInterface, UnderlyingBaseDepth,
                 InterfaceFq, ArgumentIndex, IsStatic, IsDuckCall,
                 OriginalMethodName, OriginalContainingTypeFq, OriginalIsExtensionMethod,

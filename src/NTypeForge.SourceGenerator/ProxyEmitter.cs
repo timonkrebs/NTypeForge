@@ -128,7 +128,7 @@ namespace NTypeForge.SourceGenerator
                 sb.AppendLine();
                 sb.AppendLine($"namespace {targetNamespace}");
                 sb.AppendLine("{");
-                sb.AppendLine($"    public static class {extensionClassName}");
+                sb.AppendLine($"    {(first.TargetIsPublic ? "public" : "internal")} static class {extensionClassName}");
                 sb.AppendLine("    {");
                 sb.AppendLine($"        extension ({targetFullName} {receiver})");
                 sb.AppendLine("        {");

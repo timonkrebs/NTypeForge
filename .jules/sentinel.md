@@ -1,0 +1,4 @@
+## 2025-06-09 - [Principle of Least Privilege] Generate Internal Extensions for Internal Types
+**Vulnerability:** Source Generator `NTypeForge.SourceGenerator` was always emitting `public static class` for its duck-typing extensions. If the type being ducked (`target`) was `internal`, this created a `CS0051: Inconsistent accessibility` compiler error and essentially violated the principle of least privilege, potentially leaking internal types into public scope.
+**Learning:** Source Generators creating types meant to be used alongside user code should dynamically match the accessibility of their targets (or default to `internal` if appropriate for their use-case) to prevent scope leakage.
+**Prevention:** Check `DeclaredAccessibility == Accessibility.Public` (or effective accessibility for nested types) on the target type, and emit `internal static class` instead of `public static class` when the target is not public.

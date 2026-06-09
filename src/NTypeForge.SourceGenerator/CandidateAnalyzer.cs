@@ -75,6 +75,15 @@ namespace NTypeForge.SourceGenerator
                accessibility == Accessibility.Internal ||
                accessibility == Accessibility.ProtectedOrInternal;
 
+        private static bool IsEffectivelyPublic(ITypeSymbol type)
+        {
+            for (var current = type; current != null; current = current.ContainingType)
+            {
+                if (current.DeclaredAccessibility != Accessibility.Public) return false;
+            }
+            return true;
+        }
+
         private static ITypeSymbol GetUnderlyingType(ITypeSymbol type)
         {
             bool IsProxyInterface(ITypeSymbol t)
@@ -418,6 +427,7 @@ namespace NTypeForge.SourceGenerator
                 targetNamespace: SymbolNames.NamespaceOf(target),
                 targetMinimalName: SymbolNames.MinimalName(target),
                 targetIsInterface: target.TypeKind == TypeKind.Interface,
+                targetIsPublic: IsEffectivelyPublic(target),
                 argumentIsInterface: argType.TypeKind == TypeKind.Interface,
                 argumentFq: SymbolNames.Fq(argType),
                 underlyingFq: SymbolNames.Fq(underlyingType),
