@@ -145,6 +145,42 @@ public class DiagnosticTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
+    // A concrete method with different parameter types from the interface method cannot satisfy it.
+    [Fact]
+    public void NTF001_WhenParameterTypeDiffers()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface I { void Do(int a); }
+                public class C { public void Do(string a) {} }
+                public class U { public void M() { var x = new C().Duck<I>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // A concrete method with a different parameter count from the interface method cannot satisfy it.
+    [Fact]
+    public void NTF001_WhenParameterCountDiffers()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface I { void Do(int a, int b); }
+                public class C { public void Do(int a) {} }
+                public class U { public void M() { var x = new C().Duck<I>(); } }
+            }
+            """;
+
+        Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
     // Regression: a concrete with a *private* setter must not be treated as satisfying a `{ get; set; }`
     // requirement. The proxy would emit `_instance.Value = value` against an inaccessible setter
     // (CS0272). Expect a clean NTF001 with no emitted compile errors instead.
