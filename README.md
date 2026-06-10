@@ -140,6 +140,15 @@ var calculator = new AddCalculator();
 float result = CalculatorManager.HandleCalculateStatic(calculator, 2, 3);
 ```
 
+If a call needs *several* arguments bridged at once, they are all ducked together —
+the generated overload replaces every duck-typed parameter, and each argument gets
+its own proxy:
+
+```cs
+// HandleBoth(ICalculator calculator, ILogger logger, float a, float b)
+manager.HandleBoth(new AddCalculator(), new ConsoleLogger(), 10, 20); // ✅ both arguments ducked
+```
+
 ### 2. Create a proxy explicitly with `Duck<T>()`
 
 When you want the interface value itself (to store it, return it, or pass it
@@ -300,7 +309,9 @@ public static class CalculatorManager_DuckTypingExtensions
 The names above are simplified: the real proxy and extension-class names carry a
 stable hash suffix for uniqueness. And when the ducked argument's static type is an
 *interface* (rather than a concrete type as here), the forwarding method first emits
-`TryUnbox` branches to unwrap an existing proxy before re-wrapping it.
+`TryUnbox` branches to unwrap an existing proxy before re-wrapping it. When several
+arguments are ducked in the same call, the one forwarding method replaces every
+duck-typed parameter and wraps each argument in its own proxy.
 
 The generated pipeline is fully cacheable: each call site is reduced to a
 value-equatable model (strings/enums only — no symbols held), so edits that don't
