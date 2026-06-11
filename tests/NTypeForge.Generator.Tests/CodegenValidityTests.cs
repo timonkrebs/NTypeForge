@@ -103,6 +103,108 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
+    // Issue #11: a call can need several arguments ducked at once. One forwarding extension must
+    // replace every duck-typed parameter, wrapping each argument in its own proxy - the user's
+    // call cannot bind otherwise. (If nothing were generated, the snippet's own call error would
+    // surface here, so this assertion is not vacuous.)
+    [Fact]
+    public void TwoDuckedArguments_EmitCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public interface ILog { string Log(string m); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Logger { public string Log(string m) => m; }
+                public class Mgr
+                {
+                    public string H(ICalc c, ILog l, int offset) => l.Log((c.Add(1, 2) + offset).ToString());
+                    public void M() { var m = new Mgr(); m.H(new Adder(), new Logger(), 3); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Two ducked arguments of the *same* interface: one proxy type, two independent wraps.
+    [Fact]
+    public void TwoDuckedArguments_SameInterface_EmitCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ICalc first, ICalc second) => first.Add(1, 2) + second.Add(3, 4);
+                    public void M() { var m = new Mgr(); m.H(new Adder(), new Adder()); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // Three ducked arguments interleaved with passthrough parameters, supplied via named,
+    // reordered arguments: parameter mapping and per-argument replacement must agree.
+    [Fact]
+    public void ThreeDuckedArguments_WithNamedReorderedArguments_EmitCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public interface ILog { string Log(string m); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Logger { public string Log(string m) => m; }
+                public class Mgr
+                {
+                    public string H(ICalc c, int offset, ILog l, ILog l2) => l2.Log(l.Log((c.Add(1, 2) + offset).ToString()));
+                    public void M() { var m = new Mgr(); m.H(l: new Logger(), c: new Adder(), offset: 3, l2: new Logger()); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // One of the two ducked arguments is itself interface-typed (a re-ducked proxy): its proxy is
+    // resolved through TryUnbox branches into a local, alongside the direct wrap of the concrete
+    // argument - the multi-argument body shape.
+    [Fact]
+    public void TwoDuckedArguments_OneInterfaceTyped_EmitCompilableCode()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public interface IOther { int Add(int a, int b); }
+                public interface ILog { string Log(string m); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Logger { public string Log(string m) => m; }
+                public class Mgr
+                {
+                    public string H(ICalc c, ILog l) => l.Log(c.Add(1, 2).ToString());
+                    public void M()
+                    {
+                        var m = new Mgr();
+                        IOther other = new Adder().Duck<IOther>();
+                        m.H(other, new Logger());
+                    }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
     [Fact]
     public void MethodArgumentDucking_ForExtensionMethod_EmitsCompilableCode()
     {

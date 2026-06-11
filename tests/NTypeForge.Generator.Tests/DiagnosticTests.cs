@@ -413,6 +413,83 @@ public class DiagnosticTests
         Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
     }
 
+    // Several arguments duck in the same call only as a whole: when one of them has no structural
+    // match, the site must not be bridged at all (a forwarding method ducking just the matching
+    // argument could never bind), and no NTF00x may mask the compiler's own error.
+    [Fact]
+    public void TwoDuckableArguments_OneWithoutMatch_IsNotRewired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public interface ILog { string Log(string m); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class NotALogger { public int Other() => 0; }
+                public class Mgr
+                {
+                    public string H(ICalc c, ILog l) => l.Log(c.Add(1, 2).ToString());
+                    public void M() { var m = new Mgr(); m.H(new Adder(), new NotALogger()); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+    }
+
+    // The multi-argument near-miss: every ducked argument satisfies its proxyable contract and the
+    // only blocker is one interface's unsupported (static-abstract) member - exactly one NTF003,
+    // naming that argument.
+    [Fact]
+    public void NTF003_WhenOneOfTwoDuckedArgumentsBlockedOnlyByUnsupportedMember()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public interface IFactory { static abstract IFactory Create(); int Do(); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Impl { public int Do() => 1; }
+                public class Mgr
+                {
+                    public void H(ICalc c, IFactory f) {}
+                    public void M() { var m = new Mgr(); m.H(new Adder(), new Impl()); }
+                }
+            }
+            """;
+
+        var diagnostics = GeneratorTestHarness.GetGeneratorDiagnostics(source);
+        var ntf003 = diagnostics.Single(d => d.Id == "NTF003");
+        Assert.Contains("IFactory", ntf003.GetMessage());
+    }
+
+    // Two overloads, each of which could fix the call by ducking both of its arguments, are still
+    // ambiguous: multi-argument support must not erode the one-interpretation rule.
+    [Fact]
+    public void AmbiguousOverloads_WithTwoDuckableArgumentsEach_AreNotRewired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IA { int Do(); }
+                public interface IB { int Do(); }
+                public class Impl { public int Do() => 1; }
+                public class Mgr
+                {
+                    public void H(IA a, IB b) {}
+                    public void H(IB a, IA b) {}
+                    public void M() { var m = new Mgr(); m.H(new Impl(), new Impl()); }
+                }
+            }
+            """;
+
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+    }
+
     // A static-qualified `DuckExtensions.Duck<T>(x)` cannot bind to the generated instance extension
     // member, so it is not a duck site. The analyzer must not mistake the `DuckExtensions` type for
     // the ducked instance and report a spurious NTF001 against it.

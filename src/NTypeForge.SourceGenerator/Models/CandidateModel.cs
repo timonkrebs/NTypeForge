@@ -20,27 +20,14 @@ namespace NTypeForge.SourceGenerator.Models
         public bool TargetIsInterface { get; }
         public bool TargetIsPublic { get; }
 
-        // Static type of the ducked argument (only meaningful for method-argument ducking).
-        public bool ArgumentIsInterface { get; }
-        public string ArgumentFq { get; }
+        // The arguments this site ducks, ordered by ArgumentIndex. A Duck<T> call has exactly
+        // one; a method-argument site has one per parameter that needs a proxy.
+        public IReadOnlyList<DuckedArgModel> DuckedArgs { get; }
 
-        // The type actually wrapped by the proxy (the concrete being ducked, or - when an
-        // existing proxy is re-ducked - the interface it currently presents).
-        public string UnderlyingFq { get; }
-        public string UnderlyingNamespace { get; }
-        public string UnderlyingMinimalName { get; }
-        public bool UnderlyingIsInterface { get; }
-        public int UnderlyingBaseDepth { get; }
-
-        // The interface the generated proxy implements.
-        public string InterfaceFq { get; }
-        public string InterfaceMinimalName { get; }
-
-        public int ArgumentIndex { get; }
         public bool IsStatic { get; }
         public bool IsDuckCall { get; }
 
-        // The original (failing) method whose duck-typed parameter we forward through a proxy.
+        // The original (failing) method whose duck-typed parameters we forward through proxies.
         // Unused for Duck<T> calls.
         public string OriginalMethodName { get; }
         public string OriginalContainingTypeFq { get; }
@@ -51,22 +38,6 @@ namespace NTypeForge.SourceGenerator.Models
         public int OriginalArity { get; }
         public IReadOnlyList<string> OriginalTypeParameters { get; }
         public IReadOnlyList<string> OriginalConstraints { get; }
-
-        // Members the proxy must implement (interface + inherited, deduped). Also used as the
-        // structural requirement when matching this interface against other concrete types.
-        public IReadOnlyList<MethodSig> MethodRequirements { get; }
-        public IReadOnlyList<PropertySig> PropertyRequirements { get; }
-        public IReadOnlyList<IndexerSig> IndexerRequirements { get; }
-        public IReadOnlyList<EventSig> EventRequirements { get; }
-
-        // CompatKeys of the underlying type's directly-declared methods, for matching it against
-        // other interfaces' requirements.
-        public IReadOnlyList<string> UnderlyingSurfaceCompatKeys { get; }
-        // True when the underlying type structurally satisfies the interface.
-        public bool IsSelfMatch { get; }
-        // Non-null when the interface has a member NTypeForge can't proxy (property/event/generic
-        // method); names the offending member for the NTF002 diagnostic.
-        public string? UnsupportedMemberName { get; }
 
         // Diagnostic location, decomposed so it stays equatable and roots nothing.
         public string? DiagFilePath { get; }
@@ -79,19 +50,11 @@ namespace NTypeForge.SourceGenerator.Models
 
         public CandidateModel(
             string targetFq, string targetNamespace, string targetMinimalName, bool targetIsInterface, bool targetIsPublic,
-            bool argumentIsInterface, string argumentFq,
-            string underlyingFq, string underlyingNamespace, string underlyingMinimalName, bool underlyingIsInterface, int underlyingBaseDepth,
-            string interfaceFq, string interfaceMinimalName,
-            int argumentIndex, bool isStatic, bool isDuckCall,
+            IReadOnlyList<DuckedArgModel> duckedArgs,
+            bool isStatic, bool isDuckCall,
             string originalMethodName, string originalContainingTypeFq, bool originalIsExtensionMethod,
             string originalReturnTypeFq, bool originalReturnsVoid, IReadOnlyList<ParamSig> originalParameters,
             int originalArity, IReadOnlyList<string> originalTypeParameters, IReadOnlyList<string> originalConstraints,
-            IReadOnlyList<MethodSig> methodRequirements,
-            IReadOnlyList<PropertySig> propertyRequirements,
-            IReadOnlyList<IndexerSig> indexerRequirements,
-            IReadOnlyList<EventSig> eventRequirements,
-            IReadOnlyList<string> underlyingSurfaceCompatKeys,
-            bool isSelfMatch, string? unsupportedMemberName,
             string? diagFilePath, TextSpan diagSpan, LinePositionSpan diagLineSpan)
         {
             TargetFq = targetFq;
@@ -99,16 +62,7 @@ namespace NTypeForge.SourceGenerator.Models
             TargetMinimalName = targetMinimalName;
             TargetIsInterface = targetIsInterface;
             TargetIsPublic = targetIsPublic;
-            ArgumentIsInterface = argumentIsInterface;
-            ArgumentFq = argumentFq;
-            UnderlyingFq = underlyingFq;
-            UnderlyingNamespace = underlyingNamespace;
-            UnderlyingMinimalName = underlyingMinimalName;
-            UnderlyingIsInterface = underlyingIsInterface;
-            UnderlyingBaseDepth = underlyingBaseDepth;
-            InterfaceFq = interfaceFq;
-            InterfaceMinimalName = interfaceMinimalName;
-            ArgumentIndex = argumentIndex;
+            DuckedArgs = duckedArgs;
             IsStatic = isStatic;
             IsDuckCall = isDuckCall;
             OriginalMethodName = originalMethodName;
@@ -120,13 +74,6 @@ namespace NTypeForge.SourceGenerator.Models
             OriginalArity = originalArity;
             OriginalTypeParameters = originalTypeParameters;
             OriginalConstraints = originalConstraints;
-            MethodRequirements = methodRequirements;
-            PropertyRequirements = propertyRequirements;
-            IndexerRequirements = indexerRequirements;
-            EventRequirements = eventRequirements;
-            UnderlyingSurfaceCompatKeys = underlyingSurfaceCompatKeys;
-            IsSelfMatch = isSelfMatch;
-            UnsupportedMemberName = unsupportedMemberName;
             DiagFilePath = diagFilePath;
             DiagSpan = diagSpan;
             DiagLineSpan = diagLineSpan;
@@ -138,19 +85,15 @@ namespace NTypeForge.SourceGenerator.Models
             var prms = string.Join(",", OriginalParameters.Select(p => p.Key));
             var tps = string.Join(",", OriginalTypeParameters);
             var constraints = string.Join(",", OriginalConstraints);
-            var reqs = string.Join(",", MethodRequirements.Select(m => m.CompatKey));
-            var props = string.Join(",", PropertyRequirements.Select(p => p.CompatKey));
-            var idxs = string.Join(",", IndexerRequirements.Select(i => i.CompatKey));
-            var evts = string.Join(",", EventRequirements.Select(e => e.CompatKey));
-            var surface = string.Join(",", UnderlyingSurfaceCompatKeys);
+            // Arg keys are joined with a distinct separator so arg boundaries cannot blur into
+            // the field separator used inside each key.
+            var args = string.Join(";;", DuckedArgs.Select(a => a.Key));
             return string.Join("|",
-                TargetFq, TargetIsInterface, TargetIsPublic, ArgumentFq, ArgumentIsInterface,
-                UnderlyingFq, UnderlyingIsInterface, UnderlyingBaseDepth,
-                InterfaceFq, ArgumentIndex, IsStatic, IsDuckCall,
+                TargetFq, TargetIsInterface, TargetIsPublic,
+                args, IsStatic, IsDuckCall,
                 OriginalMethodName, OriginalContainingTypeFq, OriginalIsExtensionMethod,
                 OriginalReturnTypeFq, OriginalReturnsVoid, prms,
                 OriginalArity, tps, constraints,
-                reqs, props, idxs, evts, surface, IsSelfMatch, UnsupportedMemberName ?? "",
                 DiagFilePath ?? "", DiagSpan.Start, DiagSpan.Length);
         }
 

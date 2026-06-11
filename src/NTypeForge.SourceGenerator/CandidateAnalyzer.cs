@@ -16,6 +16,23 @@ namespace NTypeForge.SourceGenerator
     // of the model. Returns null for invocations that are not duck-typing sites.
     internal static class CandidateAnalyzer
     {
+        // A ducked argument still in symbol form, resolved per argument before model assembly.
+        private readonly struct DuckedArgSite
+        {
+            public readonly ITypeSymbol ArgType;
+            public readonly ITypeSymbol UnderlyingType;
+            public readonly ITypeSymbol InterfaceType;
+            public readonly int EmittedIndex;
+
+            public DuckedArgSite(ITypeSymbol argType, ITypeSymbol underlyingType, ITypeSymbol interfaceType, int emittedIndex)
+            {
+                ArgType = argType;
+                UnderlyingType = underlyingType;
+                InterfaceType = interfaceType;
+                EmittedIndex = emittedIndex;
+            }
+        }
+
         public static CandidateModel? GetCandidate(GeneratorSyntaxContext context)
         {
             var invocation = (InvocationExpressionSyntax)context.Node;
@@ -26,7 +43,7 @@ namespace NTypeForge.SourceGenerator
             if (duckCall != null) return duckCall;
 
             // A call that bound successfully needs no duck typing; only a failed overload
-            // resolution (Symbol == null, with candidates) can be rescued by a generated proxy.
+            // resolution (Symbol == null, with candidates) can be rescued by generated proxies.
             if (symbolInfo.Symbol != null || symbolInfo.CandidateSymbols.Length == 0) return null;
 
             return TryGetMethodArgumentDuck(invocation, semanticModel, symbolInfo);
@@ -141,9 +158,9 @@ namespace NTypeForge.SourceGenerator
             if (AlreadyImplements(semanticModel, argType, targetInterface)) return null;
 
             return BuildModel(
-                invocation, target: argType, argType: argType, underlyingType: underlyingType,
-                interfaceType: targetInterface, argumentIndex: 0, isStatic: false, isDuckCall: true,
-                originalMethod: null);
+                invocation, target: argType,
+                duckedArgs: new[] { new DuckedArgSite(argType, underlyingType, targetInterface, emittedIndex: 0) },
+                isStatic: false, isDuckCall: true, originalMethod: null);
         }
 
         private static bool AlreadyImplements(SemanticModel semanticModel, ITypeSymbol type, ITypeSymbol interfaceType)
@@ -171,42 +188,68 @@ namespace NTypeForge.SourceGenerator
             return memberAccess.Expression;
         }
 
-        // A failed call whose argument could implicitly become an interface parameter via a proxy.
-        // We rewire only when the call has exactly one duckable interpretation. With more than one,
-        // silently choosing a single (overload, argument) would be non-deterministic and could bind
-        // the call to the wrong overload, so we leave the original (still-failing) call for the
-        // compiler to report - which is also what suppresses the NTF003 near-miss on ambiguous sites.
+        // A failed call whose arguments could implicitly become interface parameters via proxies.
+        // Within one overload, every duckable argument is ducked together (each one that fails to
+        // convert must be replaced for the forwarded call to bind), so the overload's whole set of
+        // duckable arguments is a single interpretation. We rewire only when the call has exactly
+        // one duckable interpretation. With more than one, silently choosing a single overload
+        // would be non-deterministic and could bind the call to the wrong one, so we leave the
+        // original (still-failing) call for the compiler to report - which is also what suppresses
+        // the NTF003 near-miss on ambiguous sites.
         private static CandidateModel? TryGetMethodArgumentDuck(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
         {
             if (invocation.Expression is not MemberAccessExpressionSyntax) return null;
 
-            var sites = DistinctInterpretations(CollectDuckableArgumentSites(invocation, semanticModel, symbolInfo));
-            if (sites.Count != 1) return null;
+            var interpretations = DistinctInterpretations(CollectDuckableInterpretations(invocation, semanticModel, symbolInfo));
+            if (interpretations.Count != 1) return null;
 
-            var (candidate, paramIndex, syntaxIndex) = sites[0];
-            var argType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[syntaxIndex].Expression).Type!;
-            var underlyingType = GetUnderlyingType(argType);
+            var (candidate, args) = interpretations[0];
             var target = GetForwardingTarget(invocation, semanticModel, candidate);
             if (target == null ||
                 ContainsTypeParameter(target) ||
-                ContainsTypeParameter(argType) ||
-                ContainsTypeParameter(underlyingType) ||
-                ContainsTypeParameter(candidate.Parameters[paramIndex].Type) ||
                 !IsUsableFromGeneratedTopLevelCode(candidate.ContainingType!) ||
-                !IsUsableFromGeneratedTopLevelCode(target) ||
-                !IsUsableFromGeneratedTopLevelCode(argType) ||
-                !IsUsableFromGeneratedTopLevelCode(underlyingType) ||
-                !IsUsableFromGeneratedTopLevelCode(candidate.Parameters[paramIndex].Type))
+                !IsUsableFromGeneratedTopLevelCode(target))
                 return null;
 
+            var duckedArgs = ResolveDuckedArgSites(invocation, semanticModel, candidate, args);
+            if (duckedArgs == null) return null;
+
             return BuildModel(
-                invocation, target: target, argType: argType,
-                underlyingType: underlyingType, interfaceType: candidate.Parameters[paramIndex].Type,
-                argumentIndex: EmittedParameterIndex(candidate, paramIndex),
+                invocation, target: target, duckedArgs,
                 isStatic: candidate.IsStatic && !IsExtensionLike(candidate),
                 isDuckCall: false,
                 originalMethod: candidate);
+        }
+
+        // Resolves each duckable (parameter, argument) pair of the chosen overload to its symbol
+        // triple, ordered by emitted parameter index so the model is independent of named-argument
+        // order. Null when any argument involves a type the generated code could not utter (an
+        // open type parameter or an inaccessible type) - the site is then left alone as a whole,
+        // since a forwarding method missing one ducked parameter could never bind.
+        private static List<DuckedArgSite>? ResolveDuckedArgSites(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, IMethodSymbol candidate,
+            IReadOnlyList<(int ParamIndex, int SyntaxIndex)> args)
+        {
+            var resolved = new List<DuckedArgSite>(args.Count);
+            foreach (var (paramIndex, syntaxIndex) in args)
+            {
+                var argType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[syntaxIndex].Expression).Type!;
+                var underlyingType = GetUnderlyingType(argType);
+                var interfaceType = candidate.Parameters[paramIndex].Type;
+                if (ContainsTypeParameter(argType) ||
+                    ContainsTypeParameter(underlyingType) ||
+                    ContainsTypeParameter(interfaceType) ||
+                    !IsUsableFromGeneratedTopLevelCode(argType) ||
+                    !IsUsableFromGeneratedTopLevelCode(underlyingType) ||
+                    !IsUsableFromGeneratedTopLevelCode(interfaceType))
+                    return null;
+
+                resolved.Add(new DuckedArgSite(argType, underlyingType, interfaceType, EmittedParameterIndex(candidate, paramIndex)));
+            }
+
+            resolved.Sort((a, b) => a.EmittedIndex.CompareTo(b.EmittedIndex));
+            return resolved;
         }
 
         private static bool IsExtensionLike(IMethodSymbol method)
@@ -232,61 +275,64 @@ namespace NTypeForge.SourceGenerator
         private static int EmittedParameterIndex(IMethodSymbol candidate, int paramIndex)
             => HasExplicitExtensionReceiverParameter(candidate) ? paramIndex - 1 : paramIndex;
 
-        // Collapses (overload, argument) sites that would generate the same forwarding method - an
-        // override and the base it hides, or a symbol Roslyn lists more than once - so they don't
-        // count as a false ambiguity. Genuinely distinct interpretations (different target interface
-        // or different remaining parameters) survive as separate entries.
-        private static List<(IMethodSymbol Candidate, int ParamIndex, int SyntaxIndex)> DistinctInterpretations(
-            List<(IMethodSymbol Candidate, int ParamIndex, int SyntaxIndex)> sites)
+        // Collapses interpretations that would generate the same forwarding method - an override
+        // and the base it hides, or a symbol Roslyn lists more than once - so they don't count as
+        // a false ambiguity. Genuinely distinct interpretations (different target interfaces or
+        // different remaining parameters) survive as separate entries.
+        private static List<(IMethodSymbol Candidate, List<(int ParamIndex, int SyntaxIndex)> Args)> DistinctInterpretations(
+            List<(IMethodSymbol Candidate, List<(int ParamIndex, int SyntaxIndex)> Args)> interpretations)
         {
-            // Nothing to dedup with 0 or 1 sites (the common case); skip the HashSet and key strings.
-            if (sites.Count <= 1) return sites;
+            // Nothing to dedup with 0 or 1 interpretations (the common case); skip the HashSet and
+            // key strings.
+            if (interpretations.Count <= 1) return interpretations;
 
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            var result = new List<(IMethodSymbol Candidate, int ParamIndex, int SyntaxIndex)>();
-            foreach (var site in sites)
+            var result = new List<(IMethodSymbol Candidate, List<(int ParamIndex, int SyntaxIndex)> Args)>();
+            foreach (var interpretation in interpretations)
             {
-                if (seen.Add(InterpretationKey(site.Candidate, site.ParamIndex))) result.Add(site);
+                if (seen.Add(InterpretationKey(interpretation.Candidate, interpretation.Args))) result.Add(interpretation);
             }
             return result;
         }
 
         // Identifies the forwarding method an interpretation would emit: its declaring type, which
-        // argument is ducked, and the method's canonical signature key. Reusing MethodSig.DedupKey
+        // arguments are ducked, and the method's canonical signature key. Reusing MethodSig.DedupKey
         // (name + arity + full parameter shape incl. ref kinds + constraints, generics-normalized)
         // keeps this notion of "same method" from drifting from the rest of the generator and folds
         // in cases a hand-rolled key missed - e.g. two overloads differing only by a ref kind, or two
         // same-signature methods on different declaring types. Equal keys are interchangeable;
         // differing keys are a real ambiguity the user must resolve.
-        private static string InterpretationKey(IMethodSymbol candidate, int argIndex)
-            => $"{SymbolNames.Fq(candidate.ContainingType)}|{argIndex}|{MemberSignatures.ToMethodSig(candidate).DedupKey}";
+        private static string InterpretationKey(IMethodSymbol candidate, List<(int ParamIndex, int SyntaxIndex)> args)
+            => $"{SymbolNames.Fq(candidate.ContainingType)}|{string.Join(",", args.Select(a => a.ParamIndex))}|{MemberSignatures.ToMethodSig(candidate).DedupKey}";
 
-        private static List<(IMethodSymbol Candidate, int ParamIndex, int SyntaxIndex)> CollectDuckableArgumentSites(
+        private static List<(IMethodSymbol Candidate, List<(int ParamIndex, int SyntaxIndex)> Args)> CollectDuckableInterpretations(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
         {
-            var sites = new List<(IMethodSymbol, int, int)>();
+            var interpretations = new List<(IMethodSymbol, List<(int, int)>)>();
             foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
             {
                 if (candidate.ContainingType == null) continue;
                 var arguments = invocation.ArgumentList.Arguments;
                 if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) continue;
 
-                AddDuckableArgIndices(semanticModel, candidate, arguments, parameterIndices, sites);
+                var args = CollectDuckableArgs(semanticModel, candidate, arguments, parameterIndices);
+                if (args.Count > 0) interpretations.Add((candidate, args));
             }
-            return sites;
+            return interpretations;
         }
 
-        private static void AddDuckableArgIndices(
+        private static List<(int ParamIndex, int SyntaxIndex)> CollectDuckableArgs(
             SemanticModel semanticModel, IMethodSymbol candidate,
-            SeparatedSyntaxList<ArgumentSyntax> arguments, IReadOnlyList<int> parameterIndices,
-            List<(IMethodSymbol, int, int)> sites)
+            SeparatedSyntaxList<ArgumentSyntax> arguments, IReadOnlyList<int> parameterIndices)
         {
+            var args = new List<(int, int)>();
             for (int syntaxIndex = 0; syntaxIndex < arguments.Count; syntaxIndex++)
             {
                 var paramIndex = parameterIndices[syntaxIndex];
                 if (IsDuckableArgument(semanticModel, candidate, arguments, syntaxIndex, paramIndex))
-                    sites.Add((candidate, paramIndex, syntaxIndex));
+                    args.Add((paramIndex, syntaxIndex));
             }
+            return args;
         }
 
         private static bool IsDuckableArgument(
@@ -396,21 +442,12 @@ namespace NTypeForge.SourceGenerator
         private static CandidateModel BuildModel(
             InvocationExpressionSyntax invocation,
             ITypeSymbol target,
-            ITypeSymbol argType,
-            ITypeSymbol underlyingType,
-            ITypeSymbol interfaceType,
-            int argumentIndex,
+            IReadOnlyList<DuckedArgSite> duckedArgs,
             bool isStatic,
             bool isDuckCall,
             IMethodSymbol? originalMethod)
         {
-            var requirements = InterfaceRequirementsAnalyzer.Analyze(interfaceType);
-
-            var surface = SurfaceAnalyzer.BuildSurfaceCompatKeys(underlyingType);
-            var surfaceSet = new HashSet<string>(surface, StringComparer.Ordinal);
-
-            bool isSelfMatch = StructuralMatch.IsSatisfiedBy(
-                requirements.Methods, requirements.Properties, requirements.Indexers, requirements.Events, surfaceSet);
+            var argModels = duckedArgs.Select(BuildDuckedArg).ToList();
 
             var originalDefinition = originalMethod == null ? null : OriginalExtensionDefinition(originalMethod);
             var unconstructedMethod = originalDefinition?.OriginalDefinition;
@@ -428,16 +465,7 @@ namespace NTypeForge.SourceGenerator
                 targetMinimalName: SymbolNames.MinimalName(target),
                 targetIsInterface: target.TypeKind == TypeKind.Interface,
                 targetIsPublic: IsEffectivelyPublic(target),
-                argumentIsInterface: argType.TypeKind == TypeKind.Interface,
-                argumentFq: SymbolNames.Fq(argType),
-                underlyingFq: SymbolNames.Fq(underlyingType),
-                underlyingNamespace: SymbolNames.NamespaceOf(underlyingType),
-                underlyingMinimalName: SymbolNames.MinimalName(underlyingType),
-                underlyingIsInterface: underlyingType.TypeKind == TypeKind.Interface,
-                underlyingBaseDepth: SymbolNames.BaseTypeDepth(underlyingType),
-                interfaceFq: SymbolNames.Fq(interfaceType),
-                interfaceMinimalName: SymbolNames.MinimalName(interfaceType),
-                argumentIndex: argumentIndex,
+                duckedArgs: argModels,
                 isStatic: isStatic,
                 isDuckCall: isDuckCall,
                 originalMethodName: originalMethod?.Name ?? "",
@@ -449,16 +477,39 @@ namespace NTypeForge.SourceGenerator
                 originalArity: originalSig?.Arity ?? 0,
                 originalTypeParameters: originalSig?.TypeParameters ?? Array.Empty<string>(),
                 originalConstraints: originalSig?.Constraints ?? Array.Empty<string>(),
+                diagFilePath: loc.SourceTree?.FilePath,
+                diagSpan: loc.SourceSpan,
+                diagLineSpan: loc.GetLineSpan().Span);
+        }
+
+        private static DuckedArgModel BuildDuckedArg(DuckedArgSite site)
+        {
+            var requirements = InterfaceRequirementsAnalyzer.Analyze(site.InterfaceType);
+
+            var surface = SurfaceAnalyzer.BuildSurfaceCompatKeys(site.UnderlyingType);
+            var surfaceSet = new HashSet<string>(surface, StringComparer.Ordinal);
+
+            bool isSelfMatch = StructuralMatch.IsSatisfiedBy(
+                requirements.Methods, requirements.Properties, requirements.Indexers, requirements.Events, surfaceSet);
+
+            return new DuckedArgModel(
+                argumentIndex: site.EmittedIndex,
+                argumentIsInterface: site.ArgType.TypeKind == TypeKind.Interface,
+                argumentFq: SymbolNames.Fq(site.ArgType),
+                underlyingFq: SymbolNames.Fq(site.UnderlyingType),
+                underlyingNamespace: SymbolNames.NamespaceOf(site.UnderlyingType),
+                underlyingMinimalName: SymbolNames.MinimalName(site.UnderlyingType),
+                underlyingIsInterface: site.UnderlyingType.TypeKind == TypeKind.Interface,
+                underlyingBaseDepth: SymbolNames.BaseTypeDepth(site.UnderlyingType),
+                interfaceFq: SymbolNames.Fq(site.InterfaceType),
+                interfaceMinimalName: SymbolNames.MinimalName(site.InterfaceType),
                 methodRequirements: requirements.Methods,
                 propertyRequirements: requirements.Properties,
                 indexerRequirements: requirements.Indexers,
                 eventRequirements: requirements.Events,
                 underlyingSurfaceCompatKeys: surface,
                 isSelfMatch: isSelfMatch,
-                unsupportedMemberName: requirements.Unsupported,
-                diagFilePath: loc.SourceTree?.FilePath,
-                diagSpan: loc.SourceSpan,
-                diagLineSpan: loc.GetLineSpan().Span);
+                unsupportedMemberName: requirements.Unsupported);
         }
 
         private static IEnumerable<IParameterSymbol> ForwardedParameters(IMethodSymbol method)

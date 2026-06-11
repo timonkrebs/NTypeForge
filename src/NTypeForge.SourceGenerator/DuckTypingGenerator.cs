@@ -77,87 +77,103 @@ namespace NTypeForge.SourceGenerator
             new ProxyEmitter(possibleMatches, interfaceInfo).Emit(context, allExtensions);
         }
 
-        // Sort one candidate into the emit set (structural self-match), a diagnostic (an
-        // unmatched Duck<T> or an unsupported member), or silent drop (an unmatched implicit
-        // method-argument duck, where the original call error already stands).
+        // Sort one candidate into the emit set (every ducked argument structurally self-matches),
+        // a diagnostic (an unmatched Duck<T> or an unsupported member), or silent drop (an
+        // implicit method-argument duck with an unmatched argument, where the original call error
+        // already stands). The site is bridged or dropped as a whole: a forwarding method that
+        // ducks only some of its failing arguments could never bind.
         private static void ProcessCandidate(
             SourceProductionContext context, CandidateModel candidate,
             List<CandidateModel> allExtensions,
             Dictionary<string, InterfaceInfo> interfaceInfo,
             Dictionary<string, ConcreteInfo> concreteInfo)
         {
-            if (candidate.UnsupportedMemberName != null)
+            if (candidate.DuckedArgs.Any(a => a.UnsupportedMemberName != null))
             {
                 ReportUnsupported(context, candidate);
                 return;
             }
 
-            if (!candidate.IsSelfMatch)
+            if (candidate.DuckedArgs.Any(a => !a.IsSelfMatch))
             {
                 if (candidate.IsDuckCall)
                 {
+                    var arg = candidate.DuckedArgs[0];
                     context.ReportDiagnostic(Diagnostic.Create(
                         NoStructuralMatch, candidate.ToLocation(),
-                        candidate.UnderlyingFq, candidate.InterfaceFq));
+                        arg.UnderlyingFq, arg.InterfaceFq));
                 }
                 return;
             }
 
             allExtensions.Add(candidate);
-            RegisterInterface(interfaceInfo, candidate);
-            RegisterConcrete(concreteInfo, candidate);
+            foreach (var arg in candidate.DuckedArgs)
+            {
+                RegisterInterface(interfaceInfo, arg);
+                RegisterConcrete(concreteInfo, arg);
+            }
         }
 
         // An interface member NTypeForge can't proxy was found. An explicit Duck<T> is always a hard
         // NTF002 error. An implicit method-argument duck only earns a warning, and only at a
-        // high-confidence site whose argument already satisfies every proxyable member (IsSelfMatch
-        // over a non-empty instance contract). Ambiguous sites never reach here: CandidateAnalyzer
-        // drops a failed call with more than one duckable interpretation, so any model built for an
+        // high-confidence site where every ducked argument satisfies every proxyable member of its
+        // interface (IsSelfMatch across the whole site) - so the unsupported member really is the
+        // only blocker. The warning names each argument whose interface carries one, over a
+        // non-empty instance contract. Ambiguous sites never reach here: CandidateAnalyzer drops a
+        // failed call with more than one duckable interpretation, so any model built for an
         // implicit duck is already the unique interpretation of its call.
         private static void ReportUnsupported(SourceProductionContext context, CandidateModel candidate)
         {
             if (candidate.IsDuckCall)
             {
+                var arg = candidate.DuckedArgs[0];
                 context.ReportDiagnostic(Diagnostic.Create(
                     UnsupportedInterfaceMember, candidate.ToLocation(),
-                    candidate.InterfaceFq, candidate.UnsupportedMemberName));
+                    arg.InterfaceFq, arg.UnsupportedMemberName));
+                return;
             }
-            else if (candidate.IsSelfMatch && HasInstanceRequirements(candidate))
+
+            if (candidate.DuckedArgs.Any(a => !a.IsSelfMatch)) return;
+
+            foreach (var arg in candidate.DuckedArgs)
             {
-                context.ReportDiagnostic(Diagnostic.Create(
-                    UnbridgeableImplicitDuck, candidate.ToLocation(),
-                    candidate.UnderlyingFq, candidate.InterfaceFq, candidate.UnsupportedMemberName));
+                if (arg.UnsupportedMemberName != null && HasInstanceRequirements(arg))
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        UnbridgeableImplicitDuck, candidate.ToLocation(),
+                        arg.UnderlyingFq, arg.InterfaceFq, arg.UnsupportedMemberName));
+                }
             }
         }
 
-        private static bool HasInstanceRequirements(CandidateModel candidate)
-            => candidate.MethodRequirements.Count > 0 || candidate.PropertyRequirements.Count > 0 ||
-               candidate.IndexerRequirements.Count > 0 || candidate.EventRequirements.Count > 0;
+        private static bool HasInstanceRequirements(DuckedArgModel arg)
+            => arg.MethodRequirements.Count > 0 || arg.PropertyRequirements.Count > 0 ||
+               arg.IndexerRequirements.Count > 0 || arg.EventRequirements.Count > 0;
 
-        private static void RegisterInterface(Dictionary<string, InterfaceInfo> interfaceInfo, CandidateModel candidate)
+        private static void RegisterInterface(Dictionary<string, InterfaceInfo> interfaceInfo, DuckedArgModel arg)
         {
-            if (interfaceInfo.ContainsKey(candidate.InterfaceFq)) return;
-            interfaceInfo[candidate.InterfaceFq] = new InterfaceInfo
+            if (interfaceInfo.ContainsKey(arg.InterfaceFq)) return;
+            interfaceInfo[arg.InterfaceFq] = new InterfaceInfo
             {
-                Fq = candidate.InterfaceFq,
-                MinimalName = candidate.InterfaceMinimalName,
-                MethodRequirements = candidate.MethodRequirements,
-                PropertyRequirements = candidate.PropertyRequirements,
-                IndexerRequirements = candidate.IndexerRequirements,
-                EventRequirements = candidate.EventRequirements,
+                Fq = arg.InterfaceFq,
+                MinimalName = arg.InterfaceMinimalName,
+                MethodRequirements = arg.MethodRequirements,
+                PropertyRequirements = arg.PropertyRequirements,
+                IndexerRequirements = arg.IndexerRequirements,
+                EventRequirements = arg.EventRequirements,
             };
         }
 
-        private static void RegisterConcrete(Dictionary<string, ConcreteInfo> concreteInfo, CandidateModel candidate)
+        private static void RegisterConcrete(Dictionary<string, ConcreteInfo> concreteInfo, DuckedArgModel arg)
         {
-            if (candidate.UnderlyingIsInterface || concreteInfo.ContainsKey(candidate.UnderlyingFq)) return;
-            concreteInfo[candidate.UnderlyingFq] = new ConcreteInfo
+            if (arg.UnderlyingIsInterface || concreteInfo.ContainsKey(arg.UnderlyingFq)) return;
+            concreteInfo[arg.UnderlyingFq] = new ConcreteInfo
             {
-                Fq = candidate.UnderlyingFq,
-                Namespace = candidate.UnderlyingNamespace,
-                MinimalName = candidate.UnderlyingMinimalName,
-                BaseDepth = candidate.UnderlyingBaseDepth,
-                SurfaceKeys = new HashSet<string>(candidate.UnderlyingSurfaceCompatKeys, StringComparer.Ordinal),
+                Fq = arg.UnderlyingFq,
+                Namespace = arg.UnderlyingNamespace,
+                MinimalName = arg.UnderlyingMinimalName,
+                BaseDepth = arg.UnderlyingBaseDepth,
+                SurfaceKeys = new HashSet<string>(arg.UnderlyingSurfaceCompatKeys, StringComparer.Ordinal),
             };
         }
 

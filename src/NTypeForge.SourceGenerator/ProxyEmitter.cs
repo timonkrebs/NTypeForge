@@ -51,9 +51,12 @@ namespace NTypeForge.SourceGenerator
 
             foreach (var item in allExtensions)
             {
-                AddProxy(item.UnderlyingFq, item.UnderlyingNamespace, item.UnderlyingMinimalName,
-                    item.InterfaceFq, item.InterfaceMinimalName,
-                    item.MethodRequirements, item.PropertyRequirements, item.IndexerRequirements, item.EventRequirements);
+                foreach (var arg in item.DuckedArgs)
+                {
+                    AddProxy(arg.UnderlyingFq, arg.UnderlyingNamespace, arg.UnderlyingMinimalName,
+                        arg.InterfaceFq, arg.InterfaceMinimalName,
+                        arg.MethodRequirements, arg.PropertyRequirements, arg.IndexerRequirements, arg.EventRequirements);
+                }
             }
             foreach (var kvp in _possibleMatches)
             {
@@ -147,15 +150,14 @@ namespace NTypeForge.SourceGenerator
         }
 
         // Stable, location-independent ordering key for a candidate's emitted contribution: the
-        // forwarded method name + parameter shape, then the interface and underlying types. Duck
-        // calls (empty method name / parameters) collapse to ordering by interface.
+        // forwarded method name + parameter shape, then each ducked argument's static, interface,
+        // and underlying types. Duck calls (empty method name / parameters) collapse to ordering
+        // by interface.
         private static string EmitOrderKey(CandidateModel c)
             => string.Join("|",
                 c.OriginalMethodName,
                 string.Join(",", c.OriginalParameters.Select(p => p.Key)),
-                c.ArgumentFq,
-                c.InterfaceFq,
-                c.UnderlyingFq);
+                string.Join(",", c.DuckedArgs.Select(a => $"{a.ArgumentFq}+{a.InterfaceFq}+{a.UnderlyingFq}")));
 
         // Emit a single Duck<T>() per target type that dispatches on typeof(T). One method per
         // interface would share the identical Duck<T>() signature (return type and generic
@@ -163,21 +165,22 @@ namespace NTypeForge.SourceGenerator
         // ducked to more than one interface.
         private void EmitDuckMethod(StringBuilder sb, List<CandidateModel> items, string receiver)
         {
-            var duckCandidates = new List<CandidateModel>();
+            // A Duck<T> site always ducks exactly one argument: the receiver.
+            var duckCandidates = new List<(CandidateModel Candidate, DuckedArgModel Arg)>();
             var seenDuckInterfaces = new HashSet<string>(StringComparer.Ordinal);
             foreach (var item in items)
             {
-                if (item.IsDuckCall && seenDuckInterfaces.Add(item.InterfaceFq))
-                    duckCandidates.Add(item);
+                if (item.IsDuckCall && seenDuckInterfaces.Add(item.DuckedArgs[0].InterfaceFq))
+                    duckCandidates.Add((item, item.DuckedArgs[0]));
             }
 
             if (duckCandidates.Count == 0) return;
 
             sb.AppendLine("            public T Duck<T>() where T : class");
             sb.AppendLine("            {");
-            foreach (var candidate in duckCandidates)
+            foreach (var (candidate, arg) in duckCandidates)
             {
-                var iface = candidate.InterfaceFq;
+                var iface = arg.InterfaceFq;
                 sb.AppendLine($"                if (typeof(T) == typeof({iface}))");
                 sb.AppendLine("                {");
                 // Unwrap check: only when target is an interface can it actually be a proxy that
@@ -189,7 +192,7 @@ namespace NTypeForge.SourceGenerator
                     foreach (var m in matches)
                     {
                         var local = $"__ntf_c{ui++}";
-                        sb.AppendLine($"                    if ({receiver}.TryUnbox<{m.Fq}>(out var {local})) return (T)(object)new {ProxyFullName(m.Namespace, m.MinimalName, m.Fq, candidate.InterfaceMinimalName, candidate.InterfaceFq)}({local});");
+                        sb.AppendLine($"                    if ({receiver}.TryUnbox<{m.Fq}>(out var {local})) return (T)(object)new {ProxyFullName(m.Namespace, m.MinimalName, m.Fq, arg.InterfaceMinimalName, arg.InterfaceFq)}({local});");
                     }
                 }
                 // Direct wrap. Unreachable for a proxy whose concrete type was ducked in this
@@ -197,7 +200,7 @@ namespace NTypeForge.SourceGenerator
                 // for a proxy whose concrete is unknown here (e.g. created in another assembly); in
                 // the latter case this double-wraps, but TryUnbox/Unbox still walk the full chain
                 // back to the original instance, so only single-level IProxy<T>.Inner is affected.
-                sb.AppendLine($"                    return (T)(object)new {ProxyFullName(candidate.UnderlyingNamespace, candidate.UnderlyingMinimalName, candidate.UnderlyingFq, candidate.InterfaceMinimalName, candidate.InterfaceFq)}(({candidate.UnderlyingFq}){receiver});");
+                sb.AppendLine($"                    return (T)(object)new {ProxyFullName(arg.UnderlyingNamespace, arg.UnderlyingMinimalName, arg.UnderlyingFq, arg.InterfaceMinimalName, arg.InterfaceFq)}(({arg.UnderlyingFq}){receiver});");
                 sb.AppendLine("                }");
             }
             sb.AppendLine("                throw new global::System.InvalidOperationException(\"NTypeForge: no proxy was generated for \" + typeof(T));");
@@ -218,26 +221,16 @@ namespace NTypeForge.SourceGenerator
         private void EmitForwardingMethod(
             StringBuilder sb, CandidateModel candidate, string targetFullName, string receiver, HashSet<string> generatedMethods)
         {
-            var argIndex = candidate.ArgumentIndex;
             var parameters = candidate.OriginalParameters;
-            var argName = SymbolNames.Escape(parameters[argIndex].Name);
+            var duckedByIndex = candidate.DuckedArgs.ToDictionary(a => a.ArgumentIndex);
             var methodName = SymbolNames.Escape(candidate.OriginalMethodName);
             var typeParams = candidate.OriginalArity > 0 ? $"<{string.Join(", ", candidate.OriginalTypeParameters)}>" : "";
 
-            // The forwarding call's argument list, with the duck-typed argument replaced by
-            // `argReplacement` and every other parameter passed through verbatim.
-            string CallArgs(string argReplacement) => string.Join(", ", parameters.Select((p, idx) =>
-                idx == argIndex ? argReplacement : $"{RefArgumentPrefix(p.RefKind)}{SymbolNames.Escape(p.Name)}"));
-
             var methodParams = string.Join(", ", parameters.Select((p, idx) =>
-                $"{ParamsPrefix(p)}{RefPrefix(p.RefKind)}{(idx == argIndex ? candidate.ArgumentFq : p.TypeFq)} {SymbolNames.Escape(p.Name)}{DefaultSuffix(p)}"));
+                $"{ParamsPrefix(p)}{RefPrefix(p.RefKind)}{(duckedByIndex.TryGetValue(idx, out var ducked) ? ducked.ArgumentFq : p.TypeFq)} {SymbolNames.Escape(p.Name)}{DefaultSuffix(p)}"));
 
             var methodSig = $"{methodName}{typeParams}({methodParams})";
             if (!generatedMethods.Add(methodSig)) return;
-
-            // Unwrap locals must not collide with this method's parameters or the receiver.
-            var taken = new HashSet<string>(parameters.Select(p => SymbolNames.Escape(p.Name)), StringComparer.Ordinal) { receiver };
-            var localPrefix = SafeLocalPrefix(taken);
 
             var isStatic = candidate.IsStatic ? "static " : "";
             sb.AppendLine($"            public {isStatic}{candidate.OriginalReturnTypeFq} {methodName}{typeParams}({methodParams})");
@@ -246,38 +239,124 @@ namespace NTypeForge.SourceGenerator
                 if (!string.IsNullOrEmpty(constraint)) sb.AppendLine($"                {constraint}");
             }
             sb.AppendLine("            {");
-
-            EmitForwardingUnwrapBranches(sb, candidate, argName, targetFullName, receiver, methodName, typeParams, CallArgs, localPrefix);
-
-            // Direct wrap fallback; see the note in EmitDuckMethod for the cross-assembly
-            // double-wrap boundary (recoverable via TryUnbox/Unbox).
-            var directProxy = ProxyFullName(candidate.UnderlyingNamespace, candidate.UnderlyingMinimalName, candidate.UnderlyingFq, candidate.InterfaceMinimalName, candidate.InterfaceFq);
-            var directCall = OriginalCall(candidate, targetFullName, receiver, methodName, typeParams, CallArgs($"new {directProxy}(({candidate.UnderlyingFq}){argName})"));
-            sb.AppendLine($"                {ReturnStatement(candidate.OriginalReturnsVoid, directCall)}");
+            if (candidate.DuckedArgs.Count == 1)
+                EmitSingleArgForwardingBody(sb, candidate, targetFullName, receiver, methodName, typeParams);
+            else
+                EmitMultiArgForwardingBody(sb, candidate, targetFullName, receiver, methodName, typeParams);
             sb.AppendLine("            }");
         }
 
+        // One ducked argument: each unwrap branch returns the forwarded call directly, with the
+        // direct wrap as the unconditional fall-through.
+        private void EmitSingleArgForwardingBody(
+            StringBuilder sb, CandidateModel candidate, string targetFullName, string receiver, string methodName, string typeParams)
+        {
+            var arg = candidate.DuckedArgs[0];
+            var parameters = candidate.OriginalParameters;
+            var argName = SymbolNames.Escape(parameters[arg.ArgumentIndex].Name);
+
+            string CallArgs(string argReplacement)
+                => ForwardedCallArgs(parameters, idx => idx == arg.ArgumentIndex ? argReplacement : null);
+
+            var localPrefix = SafeLocalPrefix("__ntf_c", TakenNames(parameters, receiver));
+            EmitForwardingUnwrapBranches(sb, candidate, arg, argName, targetFullName, receiver, methodName, typeParams, CallArgs, localPrefix);
+
+            // Direct wrap fallback; see the note in EmitDuckMethod for the cross-assembly
+            // double-wrap boundary (recoverable via TryUnbox/Unbox).
+            var directCall = OriginalCall(candidate, targetFullName, receiver, methodName, typeParams, CallArgs(DirectWrap(arg, argName)));
+            sb.AppendLine($"                {ReturnStatement(candidate.OriginalReturnsVoid, directCall)}");
+        }
+
+        // Several ducked arguments: each argument's proxy is resolved into an interface-typed
+        // local first (its unwrap branches run independently of the other arguments'), then one
+        // forwarding call passes them all. Returning from inside the unwrap branches - as the
+        // single-argument body does - would need a branch per combination of the arguments'
+        // unwrap outcomes.
+        private void EmitMultiArgForwardingBody(
+            StringBuilder sb, CandidateModel candidate, string targetFullName, string receiver, string methodName, string typeParams)
+        {
+            var parameters = candidate.OriginalParameters;
+            var taken = TakenNames(parameters, receiver);
+            var unwrapPrefix = SafeLocalPrefix("__ntf_c", taken);
+            var proxyPrefix = SafeLocalPrefix("__ntf_p", taken);
+
+            var replacements = new Dictionary<int, string>();
+            int unwrapCounter = 0, proxyCounter = 0;
+            foreach (var arg in candidate.DuckedArgs)
+            {
+                var argName = SymbolNames.Escape(parameters[arg.ArgumentIndex].Name);
+                replacements[arg.ArgumentIndex] = EmitArgProxyResolution(
+                    sb, arg, argName, unwrapPrefix, proxyPrefix, ref unwrapCounter, ref proxyCounter);
+            }
+
+            var callArgs = ForwardedCallArgs(parameters, idx => replacements.TryGetValue(idx, out var r) ? r : null);
+            var call = OriginalCall(candidate, targetFullName, receiver, methodName, typeParams, callArgs);
+            sb.AppendLine($"                {ReturnStatement(candidate.OriginalReturnsVoid, call)}");
+        }
+
+        // The expression producing one ducked argument's proxy: the direct wrap when the incoming
+        // value cannot be a proxy itself, otherwise a local assigned through TryUnbox branches
+        // (mirroring the single-argument unwrap branches). Counters are shared across the whole
+        // method body because an `out var` in an if-condition scopes to the enclosing block.
+        private string EmitArgProxyResolution(
+            StringBuilder sb, DuckedArgModel arg, string argName,
+            string unwrapPrefix, string proxyPrefix, ref int unwrapCounter, ref int proxyCounter)
+        {
+            var direct = DirectWrap(arg, argName);
+            if (!arg.ArgumentIsInterface || !_possibleMatches.TryGetValue(arg.InterfaceFq, out var matches) || matches.Count == 0)
+                return direct;
+
+            var local = $"{proxyPrefix}{proxyCounter++}";
+            sb.AppendLine($"                {arg.InterfaceFq} {local};");
+            var keyword = "if";
+            foreach (var m in matches)
+            {
+                var unwrapped = $"{unwrapPrefix}{unwrapCounter++}";
+                var proxy = ProxyFullName(m.Namespace, m.MinimalName, m.Fq, arg.InterfaceMinimalName, arg.InterfaceFq);
+                sb.AppendLine($"                {keyword} ({argName}.TryUnbox<{m.Fq}>(out var {unwrapped})) {local} = new {proxy}({unwrapped});");
+                keyword = "else if";
+            }
+            sb.AppendLine($"                else {local} = {direct};");
+            return local;
+        }
+
         private void EmitForwardingUnwrapBranches(
-            StringBuilder sb, CandidateModel candidate, string argName, string targetFullName, string receiver, string methodName, string typeParams,
+            StringBuilder sb, CandidateModel candidate, DuckedArgModel arg, string argName, string targetFullName, string receiver, string methodName, string typeParams,
             Func<string, string> callArgs, string localPrefix)
         {
             // Unwrap branches only make sense when the incoming value can actually be a proxy, i.e.
             // when its static type is an interface. For a concrete argument type they are dead
             // branches and force a needless box, so we skip straight to the direct wrap.
-            if (!candidate.ArgumentIsInterface || !_possibleMatches.TryGetValue(candidate.InterfaceFq, out var matches))
+            if (!arg.ArgumentIsInterface || !_possibleMatches.TryGetValue(arg.InterfaceFq, out var matches))
                 return;
 
             int ui = 0;
             foreach (var m in matches)
             {
                 var local = $"{localPrefix}{ui++}";
-                var proxy = ProxyFullName(m.Namespace, m.MinimalName, m.Fq, candidate.InterfaceMinimalName, candidate.InterfaceFq);
+                var proxy = ProxyFullName(m.Namespace, m.MinimalName, m.Fq, arg.InterfaceMinimalName, arg.InterfaceFq);
                 var call = OriginalCall(candidate, targetFullName, receiver, methodName, typeParams, callArgs($"new {proxy}({local})"));
                 sb.AppendLine($"                if ({argName}.TryUnbox<{m.Fq}>(out var {local})) {{");
                 sb.AppendLine($"                    {(candidate.OriginalReturnsVoid ? $"{call}; return;" : $"return {call};")}");
                 sb.AppendLine("                }");
             }
         }
+
+        // The forwarding call's argument list: each ducked index replaced per `replacementFor`
+        // (null = not ducked), every other parameter passed through verbatim.
+        private static string ForwardedCallArgs(IReadOnlyList<ParamSig> parameters, Func<int, string?> replacementFor)
+            => string.Join(", ", parameters.Select((p, idx) =>
+                replacementFor(idx) ?? $"{RefArgumentPrefix(p.RefKind)}{SymbolNames.Escape(p.Name)}"));
+
+        // The unconditional wrap of a ducked argument in its proxy; see the note in EmitDuckMethod
+        // for the cross-assembly double-wrap boundary (recoverable via TryUnbox/Unbox).
+        private static string DirectWrap(DuckedArgModel arg, string argName)
+            => $"new {ProxyFullName(arg.UnderlyingNamespace, arg.UnderlyingMinimalName, arg.UnderlyingFq, arg.InterfaceMinimalName, arg.InterfaceFq)}(({arg.UnderlyingFq}){argName})";
+
+        // Names a generated local must not collide with: the forwarding method's parameters and
+        // the extension receiver.
+        private static HashSet<string> TakenNames(IReadOnlyList<ParamSig> parameters, string receiver)
+            => new HashSet<string>(parameters.Select(p => SymbolNames.Escape(p.Name)), StringComparer.Ordinal) { receiver };
 
         private static string OriginalCall(
             CandidateModel candidate, string targetFullName, string receiver, string methodName, string typeParams, string args)
@@ -430,11 +509,11 @@ namespace NTypeForge.SourceGenerator
         }
 
         // A prefix for generated locals emitted as `{prefix}0`, `{prefix}1`, ... that no name in
-        // `taken` collides with. The `__ntf_c` base is already collision-resistant; the loop makes
-        // it bulletproof.
-        private static string SafeLocalPrefix(ICollection<string> taken)
+        // `taken` collides with. The `__ntf_*` bases are already collision-resistant; the loop
+        // makes them bulletproof.
+        private static string SafeLocalPrefix(string basePrefix, ICollection<string> taken)
         {
-            var prefix = "__ntf_c";
+            var prefix = basePrefix;
             while (taken.Any(n => n.StartsWith(prefix, StringComparison.Ordinal) && n.Length > prefix.Length && char.IsDigit(n[prefix.Length])))
                 prefix = "_" + prefix;
             return prefix;
