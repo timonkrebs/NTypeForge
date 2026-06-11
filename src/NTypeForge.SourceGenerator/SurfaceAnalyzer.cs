@@ -12,15 +12,35 @@ namespace NTypeForge.SourceGenerator
     {
         public static IReadOnlyList<string> BuildSurfaceCompatKeys(ITypeSymbol type)
         {
+            // ToDisplayString dominates the cost of a surface scan and the same types recur
+            // constantly across members (parameter, return, and property types), so memoize it
+            // for the duration of one scan. The cache is method-local: no symbol outlives the
+            // transform that requested the scan.
+            var fqCache = new Dictionary<ITypeSymbol, string>(SymbolEqualityComparer.Default);
+            Func<ITypeSymbol, string> fq = t =>
+            {
+                if (!fqCache.TryGetValue(t, out var name))
+                {
+                    name = SymbolNames.Fq(t);
+                    fqCache[t] = name;
+                }
+                return name;
+            };
+
+            // Inline first-occurrence dedup (the same order Distinct() preserved before).
+            var seen = new HashSet<string>(StringComparer.Ordinal);
             var result = new List<string>();
             for (ITypeSymbol? current = type; current != null; current = current.BaseType)
             {
                 foreach (var member in current.GetMembers())
                 {
-                    result.AddRange(SurfaceKeysForMember(member));
+                    foreach (var key in SurfaceKeysForMember(member, fq))
+                    {
+                        if (seen.Add(key)) result.Add(key);
+                    }
                 }
             }
-            return result.Distinct(StringComparer.Ordinal).ToList();
+            return result;
         }
 
         // Every requirement key the member can satisfy on a concrete surface (a member may
@@ -28,7 +48,9 @@ namespace NTypeForge.SourceGenerator
         // Only public members count: the proxy forwards `_instance.Member`, which would not
         // compile against a private/protected/internal member (CS0122/CS0272), so a non-public
         // member must never make the type appear to structurally match.
-        private static IEnumerable<string> SurfaceKeysForMember(ISymbol member)
+        // Keys are built via the key-only fast paths (no *Sig carriers): the surface side never
+        // renders a member, it only matches, so the render-ready data would be thrown away.
+        private static IEnumerable<string> SurfaceKeysForMember(ISymbol member, Func<ITypeSymbol, string> fq)
         {
             // Static members are excluded: a proxy forwards `_instance.Member`, which does not
             // compile against a static member (CS0176). The requirement side excludes statics too,
@@ -36,33 +58,33 @@ namespace NTypeForge.SourceGenerator
             switch (member)
             {
                 case IMethodSymbol { MethodKind: MethodKind.Ordinary, DeclaredAccessibility: Accessibility.Public, IsStatic: false } method:
-                    return new[] { MemberSignatures.ToMethodSig(method).CompatKey };
+                    return new[] { MemberSignatures.MethodCompatKey(method, fq) };
                 case IPropertySymbol { IsIndexer: true, IsStatic: false } indexer:
-                    return IndexerSurfaceKeys(indexer);
+                    return IndexerSurfaceKeys(indexer, fq);
                 case IPropertySymbol { IsStatic: false } prop:
-                    return PropertySurfaceKeys(prop);
+                    return PropertySurfaceKeys(prop, fq);
                 case IEventSymbol { DeclaredAccessibility: Accessibility.Public, IsStatic: false } evt:
-                    return new[] { MemberSignatures.ToEventSig(evt).CompatKey };
+                    return new[] { EventSig.CompatKeyFor(evt.Name, fq(evt.Type)) };
                 default:
                     return Array.Empty<string>();
             }
         }
 
-        private static IEnumerable<string> IndexerSurfaceKeys(IPropertySymbol indexer)
+        private static IEnumerable<string> IndexerSurfaceKeys(IPropertySymbol indexer, Func<ITypeSymbol, string> fq)
         {
-            var typeFq = SymbolNames.Fq(indexer.Type);
-            var parameters = indexer.Parameters.Select(MemberSignatures.ToParamSig).ToList();
+            var typeFq = fq(indexer.Type);
+            var shape = MemberSignatures.ParameterShape(indexer.Parameters, fq);
             var canGet = indexer.GetMethod is { DeclaredAccessibility: Accessibility.Public };
             var canSet = indexer.SetMethod is { DeclaredAccessibility: Accessibility.Public };
-            if (canGet) yield return IndexerSig.CompatKeyFor(typeFq, parameters, true, false);
-            if (canSet) yield return IndexerSig.CompatKeyFor(typeFq, parameters, false, true);
-            if (canGet && canSet) yield return IndexerSig.CompatKeyFor(typeFq, parameters, true, true);
+            if (canGet) yield return IndexerSig.CompatKeyFor(typeFq, shape, true, false);
+            if (canSet) yield return IndexerSig.CompatKeyFor(typeFq, shape, false, true);
+            if (canGet && canSet) yield return IndexerSig.CompatKeyFor(typeFq, shape, true, true);
         }
 
-        private static IEnumerable<string> PropertySurfaceKeys(IPropertySymbol prop)
+        private static IEnumerable<string> PropertySurfaceKeys(IPropertySymbol prop, Func<ITypeSymbol, string> fq)
         {
             var name = prop.Name;
-            var typeFq = SymbolNames.Fq(prop.Type);
+            var typeFq = fq(prop.Type);
             // Each accessor is judged independently: `public int V { get; private set; }` exposes a
             // public getter but no usable setter, so it satisfies a `{ get; }` requirement but not
             // `{ get; set; }`.

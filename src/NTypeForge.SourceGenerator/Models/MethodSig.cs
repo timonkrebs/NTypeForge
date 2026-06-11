@@ -131,7 +131,12 @@ namespace NTypeForge.SourceGenerator.Models
         // Exposed statically so the surface scan can enumerate the keys a member satisfies without
         // allocating an IndexerSig.
         public static string CompatKeyFor(string typeFq, IReadOnlyList<ParamSig> parameters, bool hasGet, bool hasSet)
-            => $"Indexer:{typeFq}:[{ParamSig.Shape(parameters)}]:{(hasGet ? "G" : "")}:{(hasSet ? "S" : "")}";
+            => CompatKeyFor(typeFq, ParamSig.Shape(parameters), hasGet, hasSet);
+
+        // Shape-string core, so the surface scan can also skip materializing ParamSigs (see
+        // MemberSignatures.ParameterShape).
+        public static string CompatKeyFor(string typeFq, string parameterShape, bool hasGet, bool hasSet)
+            => $"Indexer:{typeFq}:[{parameterShape}]:{(hasGet ? "G" : "")}:{(hasSet ? "S" : "")}";
     }
 
     internal sealed class EventSig
@@ -144,7 +149,11 @@ namespace NTypeForge.SourceGenerator.Models
         {
             Name = name;
             TypeFq = typeFq;
-            CompatKey = $"Event:{typeFq}:{name}";
+            CompatKey = CompatKeyFor(name, typeFq);
         }
+
+        // Exposed statically so the surface scan can build the key without allocating an EventSig.
+        public static string CompatKeyFor(string name, string typeFq)
+            => $"Event:{typeFq}:{name}";
     }
 }

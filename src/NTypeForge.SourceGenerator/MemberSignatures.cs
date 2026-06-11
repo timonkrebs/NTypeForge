@@ -24,37 +24,56 @@ namespace NTypeForge.SourceGenerator
         public static MethodSig ToMethodSig(IMethodSymbol m)
         {
             var parameters = m.Parameters.Select(ToParamSig).ToList();
-            var arity = m.Arity;
-
-            string dedupKey, compatKey;
-            if (arity == 0)
-            {
-                // Non-generic: keys are byte-identical to the pre-generics behaviour (Fq-based).
-                dedupKey = $"{m.Name}({ParamSig.Shape(parameters)})";
-                compatKey = $"{SymbolNames.Fq(m.ReturnType)} {dedupKey}";
-            }
-            else
-            {
-                // Generic: normalize the method's own type parameters to positional tokens and fold
-                // in constraints. Two structurally identical generic methods then match regardless of
-                // type-parameter names, and a concrete whose constraints differ from the interface
-                // does NOT match (its forwarding call `_instance.M<T>(...)` wouldn't compile).
-                var paramKey = string.Join(",", m.Parameters.Select(p => $"{p.RefKind}:{NormalizeTypeKey(p.Type)}"));
-                dedupKey = $"{m.Name}`{arity}({paramKey}){NormalizeConstraintKey(m.TypeParameters)}";
-                compatKey = $"{NormalizeTypeKey(m.ReturnType)} {dedupKey}";
-            }
+            var dedupKey = MethodDedupKey(m, FqDirect);
+            var compatKey = MethodCompatKey(m, dedupKey, FqDirect);
 
             return new MethodSig(
                 m.Name,
                 SymbolNames.Fq(m.ReturnType),
                 m.ReturnType.SpecialType == SpecialType.System_Void,
                 parameters,
-                arity,
+                m.Arity,
                 m.TypeParameters.Select(tp => SymbolNames.Escape(tp.Name)).ToList(),
                 m.TypeParameters.Select(GetConstraints).ToList(),
                 dedupKey,
                 compatKey);
         }
+
+        // Cached delegate for the un-memoized Fq path, so the key builders below don't allocate a
+        // fresh method-group conversion per call.
+        private static readonly Func<ITypeSymbol, string> FqDirect = SymbolNames.Fq;
+
+        // Key-only fast path for the concrete-surface scan: the same CompatKey as
+        // ToMethodSig(m).CompatKey, without materializing the render-ready MethodSig (parameter
+        // carriers incl. default-value rendering, type-parameter and constraint lists - the
+        // surface side only ever reads the key). `fq` lets the caller memoize ToDisplayString,
+        // the dominant cost of a surface scan.
+        public static string MethodCompatKey(IMethodSymbol m, Func<ITypeSymbol, string> fq)
+            => MethodCompatKey(m, MethodDedupKey(m, fq), fq);
+
+        private static string MethodCompatKey(IMethodSymbol m, string dedupKey, Func<ITypeSymbol, string> fq)
+            => $"{(m.Arity == 0 ? fq(m.ReturnType) : NormalizeTypeKey(m.ReturnType))} {dedupKey}";
+
+        private static string MethodDedupKey(IMethodSymbol m, Func<ITypeSymbol, string> fq)
+        {
+            if (m.Arity == 0)
+            {
+                // Non-generic: keys are byte-identical to the pre-generics behaviour (Fq-based).
+                return $"{m.Name}({ParameterShape(m.Parameters, fq)})";
+            }
+
+            // Generic: normalize the method's own type parameters to positional tokens and fold
+            // in constraints. Two structurally identical generic methods then match regardless of
+            // type-parameter names, and a concrete whose constraints differ from the interface
+            // does NOT match (its forwarding call `_instance.M<T>(...)` wouldn't compile).
+            var paramKey = string.Join(",", m.Parameters.Select(p => $"{p.RefKind}:{NormalizeTypeKey(p.Type)}"));
+            return $"{m.Name}`{m.Arity}({paramKey}){NormalizeConstraintKey(m.TypeParameters)}";
+        }
+
+        // The canonical parameter-shape encoding built straight from symbols; byte-identical to
+        // ParamSig.Shape over the corresponding ToParamSig results.
+        public static string ParameterShape(IEnumerable<IParameterSymbol> parameters, Func<ITypeSymbol, string> fq)
+            => string.Join(",", parameters.Select(p => $"{p.RefKind}:{fq(p.Type)}"));
 
         public static PropertySig ToPropertySig(IPropertySymbol p)
             => new PropertySig(p.Name, SymbolNames.Fq(p.Type), p.GetMethod != null, p.SetMethod != null, p.SetMethod is { IsInitOnly: true });
