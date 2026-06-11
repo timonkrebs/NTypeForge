@@ -36,6 +36,54 @@ public class IncrementalCachingTests
     }
 
     [Fact]
+    public void EditThatMovesDuckSite_ReusesCodegenOutput()
+    {
+        // The same duck site shifted down one line: every content field of its model is
+        // unchanged, only the diagnostic span moved. Codegen compares models location-free
+        // (CandidateModel.CodegenComparer), so the emitted sources must be served from cache -
+        // before the diagnostics/codegen split, the moved span invalidated the collected array
+        // and re-emitted every generated file.
+        const string moved = "// pushes every span down one line\n" + DuckSource;
+
+        var driver = GeneratorTestHarness.CreateStepTrackingDriver();
+        driver = driver.RunGenerators(GeneratorTestHarness.Compile(DuckSource));
+        driver = driver.RunGenerators(GeneratorTestHarness.Compile(moved));
+
+        var reasons = GeneratorTestHarness.OutputStepReasons(driver).ToList();
+        Assert.NotEmpty(reasons);
+        Assert.All(reasons, r => Assert.Equal(IncrementalStepRunReason.Cached, r));
+    }
+
+    [Fact]
+    public void MovedDiagnosticSite_ReportsFreshLocation()
+    {
+        // The complement of the location-free codegen comparison: the diagnostics branch keeps
+        // full (location-sensitive) equality, so moving a failing duck site must re-report its
+        // diagnostic at the new location, not replay the stale cached one.
+        const string brokenDuck = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface IShout { void Shout(); }
+                public class Quiet { }
+                public class C { public void M() { var x = new Quiet().Duck<IShout>(); } }
+            }
+            """;
+        const string moved = "// pushes every span down one line\n" + brokenDuck;
+
+        var driver = GeneratorTestHarness.CreateStepTrackingDriver();
+        driver = driver.RunGenerators(GeneratorTestHarness.Compile(brokenDuck));
+        var before = Assert.Single(driver.GetRunResult().Diagnostics, d => d.Id == "NTF001");
+
+        driver = driver.RunGenerators(GeneratorTestHarness.Compile(moved));
+        var after = Assert.Single(driver.GetRunResult().Diagnostics, d => d.Id == "NTF001");
+
+        Assert.Equal(
+            before.Location.GetLineSpan().StartLinePosition.Line + 1,
+            after.Location.GetLineSpan().StartLinePosition.Line);
+    }
+
+    [Fact]
     public void NewDuckSite_RecomputesOutput()
     {
         // Negative control: adding a genuinely new duck site changes the candidate set, so the

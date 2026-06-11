@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -33,20 +34,20 @@ namespace NTypeForge.SourceGenerator
             }
         }
 
-        public static CandidateModel? GetCandidate(GeneratorSyntaxContext context)
+        public static CandidateModel? GetCandidate(GeneratorSyntaxContext context, CancellationToken cancellationToken)
         {
             var invocation = (InvocationExpressionSyntax)context.Node;
             var semanticModel = context.SemanticModel;
-            var symbolInfo = semanticModel.GetSymbolInfo(invocation);
+            var symbolInfo = semanticModel.GetSymbolInfo(invocation, cancellationToken);
 
-            var duckCall = TryGetDuckCall(invocation, semanticModel, symbolInfo);
+            var duckCall = TryGetDuckCall(invocation, semanticModel, symbolInfo, cancellationToken);
             if (duckCall != null) return duckCall;
 
             // A call that bound successfully needs no duck typing; only a failed overload
             // resolution (Symbol == null, with candidates) can be rescued by generated proxies.
             if (symbolInfo.Symbol != null || symbolInfo.CandidateSymbols.Length == 0) return null;
 
-            return TryGetMethodArgumentDuck(invocation, semanticModel, symbolInfo);
+            return TryGetMethodArgumentDuck(invocation, semanticModel, symbolInfo, cancellationToken);
         }
 
         // Matches the top-level `NTypeForge` namespace only, so a user's unrelated
@@ -130,16 +131,17 @@ namespace NTypeForge.SourceGenerator
         // An explicit `instance.Duck<T>()` call (the member-access form is the only one the generated
         // instance extension member can intercept; see GetDuckInstanceExpression).
         private static CandidateModel? TryGetDuckCall(
-            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo,
+            CancellationToken cancellationToken)
         {
             if (!(symbolInfo.Symbol is IMethodSymbol resolved) || resolved.Name != "Duck" ||
                 !IsTopLevelNTypeForgeNamespace(resolved.ContainingNamespace) || resolved.TypeArguments.Length != 1)
                 return null;
 
-            var instanceExpr = GetDuckInstanceExpression(invocation, semanticModel);
+            var instanceExpr = GetDuckInstanceExpression(invocation, semanticModel, cancellationToken);
             if (instanceExpr == null) return null;
 
-            var argType = semanticModel.GetTypeInfo(instanceExpr).Type;
+            var argType = semanticModel.GetTypeInfo(instanceExpr, cancellationToken).Type;
             if (argType == null) return null;
 
             var targetInterface = resolved.TypeArguments[0];
@@ -178,11 +180,11 @@ namespace NTypeForge.SourceGenerator
         // treating it as a site would only emit a spurious NTF001 against `DuckExtensions` itself -
         // we leave it to the runtime fallback instead.
         private static ExpressionSyntax? GetDuckInstanceExpression(
-            InvocationExpressionSyntax invocation, SemanticModel semanticModel)
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
             if (!(invocation.Expression is MemberAccessExpressionSyntax memberAccess)) return null;
 
-            var receiver = semanticModel.GetSymbolInfo(memberAccess.Expression).Symbol;
+            var receiver = semanticModel.GetSymbolInfo(memberAccess.Expression, cancellationToken).Symbol;
             if (receiver is ITypeSymbol or INamespaceSymbol) return null;
 
             return memberAccess.Expression;
@@ -197,22 +199,28 @@ namespace NTypeForge.SourceGenerator
         // original (still-failing) call for the compiler to report - which is also what suppresses
         // the NTF003 near-miss on ambiguous sites.
         private static CandidateModel? TryGetMethodArgumentDuck(
-            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo,
+            CancellationToken cancellationToken)
         {
             if (invocation.Expression is not MemberAccessExpressionSyntax) return null;
 
-            var interpretations = DistinctInterpretations(CollectDuckableInterpretations(invocation, semanticModel, symbolInfo));
+            // Argument-side facts (the expression's type and its proxyable underlying) do not
+            // depend on which candidate overload is being tested, so they are resolved at most
+            // once per argument here and shared across the candidate loop and site resolution.
+            var argFacts = new ArgumentDuckFact?[invocation.ArgumentList.Arguments.Count];
+            var interpretations = DistinctInterpretations(
+                CollectDuckableInterpretations(invocation, semanticModel, symbolInfo, argFacts, cancellationToken));
             if (interpretations.Count != 1) return null;
 
             var (candidate, args) = interpretations[0];
-            var target = GetForwardingTarget(invocation, semanticModel, candidate);
+            var target = GetForwardingTarget(invocation, semanticModel, candidate, cancellationToken);
             if (target == null ||
                 ContainsTypeParameter(target) ||
                 !IsUsableFromGeneratedTopLevelCode(candidate.ContainingType!) ||
                 !IsUsableFromGeneratedTopLevelCode(target))
                 return null;
 
-            var duckedArgs = ResolveDuckedArgSites(invocation, semanticModel, candidate, args);
+            var duckedArgs = ResolveDuckedArgSites(candidate, args, argFacts);
             if (duckedArgs == null) return null;
 
             return BuildModel(
@@ -224,18 +232,20 @@ namespace NTypeForge.SourceGenerator
 
         // Resolves each duckable (parameter, argument) pair of the chosen overload to its symbol
         // triple, ordered by emitted parameter index so the model is independent of named-argument
-        // order. Null when any argument involves a type the generated code could not utter (an
-        // open type parameter or an inaccessible type) - the site is then left alone as a whole,
-        // since a forwarding method missing one ducked parameter could never bind.
+        // order. The argument-side types come from the per-invocation fact cache populated by
+        // IsDuckableArgument. Null when any argument involves a type the generated code could not
+        // utter (an open type parameter or an inaccessible type) - the site is then left alone as
+        // a whole, since a forwarding method missing one ducked parameter could never bind.
         private static List<DuckedArgSite>? ResolveDuckedArgSites(
-            InvocationExpressionSyntax invocation, SemanticModel semanticModel, IMethodSymbol candidate,
-            IReadOnlyList<(int ParamIndex, int SyntaxIndex)> args)
+            IMethodSymbol candidate, IReadOnlyList<(int ParamIndex, int SyntaxIndex)> args, ArgumentDuckFact?[] argFacts)
         {
             var resolved = new List<DuckedArgSite>(args.Count);
             foreach (var (paramIndex, syntaxIndex) in args)
             {
-                var argType = semanticModel.GetTypeInfo(invocation.ArgumentList.Arguments[syntaxIndex].Expression).Type!;
-                var underlyingType = GetUnderlyingType(argType);
+                // A duckable site was recorded at this index, so its fact is populated and non-null.
+                var argFact = argFacts[syntaxIndex]!.Value;
+                var argType = argFact.Type!;
+                var underlyingType = argFact.Underlying!;
                 var interfaceType = candidate.Parameters[paramIndex].Type;
                 if (ContainsTypeParameter(argType) ||
                     ContainsTypeParameter(underlyingType) ||
@@ -262,10 +272,11 @@ namespace NTypeForge.SourceGenerator
             => method.ReducedFrom ?? method;
 
         private static ITypeSymbol? GetForwardingTarget(
-            InvocationExpressionSyntax invocation, SemanticModel semanticModel, IMethodSymbol candidate)
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, IMethodSymbol candidate,
+            CancellationToken cancellationToken)
         {
             if (candidate.ReducedFrom != null && invocation.Expression is MemberAccessExpressionSyntax memberAccess)
-                return semanticModel.GetTypeInfo(memberAccess.Expression).Type;
+                return semanticModel.GetTypeInfo(memberAccess.Expression, cancellationToken).Type;
 
             return HasExplicitExtensionReceiverParameter(candidate) && candidate.Parameters.Length > 0
                 ? candidate.Parameters[0].Type
@@ -306,7 +317,8 @@ namespace NTypeForge.SourceGenerator
             => $"{SymbolNames.Fq(candidate.ContainingType)}|{string.Join(",", args.Select(a => a.ParamIndex))}|{MemberSignatures.ToMethodSig(candidate).DedupKey}";
 
         private static List<(IMethodSymbol Candidate, List<(int ParamIndex, int SyntaxIndex)> Args)> CollectDuckableInterpretations(
-            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo)
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo,
+            ArgumentDuckFact?[] argFacts, CancellationToken cancellationToken)
         {
             var interpretations = new List<(IMethodSymbol, List<(int, int)>)>();
             foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
@@ -315,7 +327,7 @@ namespace NTypeForge.SourceGenerator
                 var arguments = invocation.ArgumentList.Arguments;
                 if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) continue;
 
-                var args = CollectDuckableArgs(semanticModel, candidate, arguments, parameterIndices);
+                var args = CollectDuckableArgs(semanticModel, candidate, arguments, parameterIndices, argFacts, cancellationToken);
                 if (args.Count > 0) interpretations.Add((candidate, args));
             }
             return interpretations;
@@ -323,34 +335,67 @@ namespace NTypeForge.SourceGenerator
 
         private static List<(int ParamIndex, int SyntaxIndex)> CollectDuckableArgs(
             SemanticModel semanticModel, IMethodSymbol candidate,
-            SeparatedSyntaxList<ArgumentSyntax> arguments, IReadOnlyList<int> parameterIndices)
+            SeparatedSyntaxList<ArgumentSyntax> arguments, IReadOnlyList<int> parameterIndices,
+            ArgumentDuckFact?[] argFacts, CancellationToken cancellationToken)
         {
             var args = new List<(int, int)>();
             for (int syntaxIndex = 0; syntaxIndex < arguments.Count; syntaxIndex++)
             {
                 var paramIndex = parameterIndices[syntaxIndex];
-                if (IsDuckableArgument(semanticModel, candidate, arguments, syntaxIndex, paramIndex))
+                if (IsDuckableArgument(semanticModel, candidate, arguments, argFacts, syntaxIndex, paramIndex, cancellationToken))
                     args.Add((paramIndex, syntaxIndex));
             }
             return args;
         }
 
+        // Ordered cheapest-first: the parameter-side test is a plain symbol-property read, the
+        // argument-side facts are one (cached, candidate-independent) GetTypeInfo plus
+        // GetUnderlyingType, and ClassifyConversion - the most expensive test - runs last, only
+        // for an interface parameter receiving a proxyable argument.
         private static bool IsDuckableArgument(
             SemanticModel semanticModel, IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments,
-            int syntaxIndex, int paramIndex)
+            ArgumentDuckFact?[] argFacts, int syntaxIndex, int paramIndex, CancellationToken cancellationToken)
         {
             if (paramIndex < 0) return false;
 
-            var arg = arguments[syntaxIndex];
-            var argType = semanticModel.GetTypeInfo(arg.Expression).Type;
             var paramType = candidate.Parameters[paramIndex].Type;
+            if (paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
 
-            if (argType == null || paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
+            var argFact = argFacts[syntaxIndex] ??=
+                ComputeArgumentDuckFact(semanticModel, arguments[syntaxIndex].Expression, cancellationToken);
+            if (argFact.Type == null) return false;
 
-            if (!IsProxyableKind(GetUnderlyingType(argType))) return false;
-
-            var conversion = semanticModel.ClassifyConversion(arg.Expression, paramType);
+            var conversion = semanticModel.ClassifyConversion(arguments[syntaxIndex].Expression, paramType);
             return !(conversion.Exists && conversion.IsImplicit);
+        }
+
+        // The candidate-independent half of IsDuckableArgument for one argument: the argument
+        // expression's type and its underlying type (cached because GetUnderlyingType walks
+        // AllInterfaces), both null when the argument can never be ducked - the expression has no
+        // type, or its underlying kind is not proxyable. Wrapped in a struct so the per-invocation
+        // cache can tell "not yet computed" (null entry) from "computed: not duckable".
+        private readonly struct ArgumentDuckFact
+        {
+            public ArgumentDuckFact(ITypeSymbol? type, ITypeSymbol? underlying)
+            {
+                Type = type;
+                Underlying = underlying;
+            }
+
+            public ITypeSymbol? Type { get; }
+            public ITypeSymbol? Underlying { get; }
+        }
+
+        private static ArgumentDuckFact ComputeArgumentDuckFact(
+            SemanticModel semanticModel, ExpressionSyntax expression, CancellationToken cancellationToken)
+        {
+            var type = semanticModel.GetTypeInfo(expression, cancellationToken).Type;
+            if (type == null) return new ArgumentDuckFact(null, null);
+
+            var underlying = GetUnderlyingType(type);
+            return IsProxyableKind(underlying)
+                ? new ArgumentDuckFact(type, underlying)
+                : new ArgumentDuckFact(null, null);
         }
 
         private static bool TryMapArgumentsToParameters(
