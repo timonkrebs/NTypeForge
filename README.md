@@ -375,8 +375,23 @@ constrained box, so treat the **absolute** numbers as worst-case and the **shape
 **Incrementality.** The generator pipeline is fully cacheable: each call site is
 reduced to a value-equatable model holding no symbols, so on an edit that doesn't
 change any duck-typing site the generator's transform is reused and the IDE stays
-responsive. Caching reuses the generator *output*; it does not remove the compiler's
-cost of binding that output on a rebuild.
+responsive. Codegen additionally compares those models *ignoring source location*,
+so an edit that merely moves a duck site (new lines above it, reformatting)
+re-reports its diagnostics at the fresh position without re-emitting a single
+generated file. Caching reuses the generator *output*; it does not remove the
+compiler's cost of binding that output on a rebuild.
+
+**Cancellation.** In an IDE, Roslyn re-runs the generator as you type and *cancels*
+the in-flight pass the moment a newer keystroke makes its result obsolete. .NET
+cancellation is cooperative — a token does nothing unless the running code observes
+it — so the pipeline threads the driver's `CancellationToken` through its semantic
+queries (a `GetSymbolInfo`/`GetTypeInfo` bind aborts mid-flight) and checks it
+between emitted files. A stale pass thus stops in microseconds instead of running to
+completion and competing for the same threads that serve completion lists and
+squiggles. Type `foo.B`, `foo.Ba`, `foo.Bar` quickly and the first two passes die
+almost free. This costs nothing at build time — on a plain `dotnet build` the token
+essentially never fires — and is invisible in the benchmarks above, which by
+construction only measure runs that complete.
 
 ---
 
