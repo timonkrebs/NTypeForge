@@ -9,8 +9,9 @@ using NTypeForge.SourceGenerator.Models;
 namespace NTypeForge.SourceGenerator
 {
     // Pipeline orchestrator. CandidateAnalyzer turns each invocation into an equatable
-    // CandidateModel; this class triages those models (emit set vs. diagnostic), computes the
-    // interface->concrete match map, and hands the result to ProxyEmitter for rendering.
+    // CandidateModel; Initialize triages those models into two disjoint output branches
+    // (diagnostics vs. emit set); Execute computes the interface->concrete match map over the
+    // emit set and hands the result to ProxyEmitter for rendering.
     [Generator]
     public class DuckTypingGenerator : IIncrementalGenerator
     {
@@ -47,70 +48,88 @@ namespace NTypeForge.SourceGenerator
             // The transform resolves every duck-typing site into a value-equatable CandidateModel
             // (strings/enums/spans only - no ISymbol or SyntaxNode). That keeps symbols out of the
             // cached pipeline, so the compilation is not rooted and edits that don't change any
-            // candidate skip regeneration. Execute consumes only these primitives.
+            // candidate skip regeneration. The output branches consume only these primitives.
             var candidates = context.SyntaxProvider
                 .CreateSyntaxProvider(
-                    predicate: static (s, _) => s is InvocationExpressionSyntax,
-                    transform: static (ctx, _) => CandidateAnalyzer.GetCandidate(ctx))
+                    predicate: static (s, _) => IsPossibleDuckSite(s),
+                    transform: static (ctx, ct) => CandidateAnalyzer.GetCandidate(ctx, ct))
                 .Where(static c => c != null)
                 .Select(static (c, _) => c!);
 
-            context.RegisterSourceOutput(candidates.Collect(), static (spc, models) => Execute(spc, models));
+            // Diagnostics and codegen are separate branches with different equality, and their
+            // filters are disjoint (a failed implicit duck with no unsupported member reaches
+            // neither: the user's original call error already stands - see ReportDiagnostic).
+            //
+            // Diagnostics compare by full Key (location included) and report per candidate, so an
+            // edit that moves a site re-reports only that diagnostic, at its fresh location.
+            var diagnosticCandidates = candidates
+                .Where(static c => c.DuckedArgs.Any(a => a.UnsupportedMemberName != null) ||
+                                   (c.IsDuckCall && c.DuckedArgs.Any(a => !a.IsSelfMatch)));
+            context.RegisterSourceOutput(diagnosticCandidates, static (spc, candidate) => ReportDiagnostic(spc, candidate));
+
+            // Codegen compares by CodegenKey (location ignored): the emitted code does not depend
+            // on where a site sits, so an edit that merely moves one (whitespace, unrelated code
+            // above it) must not invalidate the collected array and re-emit every generated file.
+            var emitCandidates = candidates
+                .Where(static c => c.DuckedArgs.All(a => a.UnsupportedMemberName == null && a.IsSelfMatch))
+                .WithComparer(CandidateModel.CodegenComparer);
+            context.RegisterSourceOutput(emitCandidates.Collect(), static (spc, models) => Execute(spc, models));
         }
 
+        // Syntactic pre-filter, run for every node of every edited file, so it must stay cheap and
+        // allocation-free. Both duck-site shapes require the member-access invocation form
+        // (TryGetDuckCall via GetDuckInstanceExpression; TryGetMethodArgumentDuck explicitly), and
+        // a zero-argument invocation can only be an explicit `x.Duck<T>()` - an implicit
+        // method-argument duck needs at least one argument to duck. Everything else (identifier
+        // and delegate calls, zero-argument calls like `x.ToString()`) is rejected here, before
+        // the transform pays for a semantic bind.
+        private static bool IsPossibleDuckSite(SyntaxNode node)
+            => node is InvocationExpressionSyntax invocation &&
+               invocation.Expression is MemberAccessExpressionSyntax memberAccess &&
+               (invocation.ArgumentList.Arguments.Count > 0 || memberAccess.Name.Identifier.ValueText == "Duck");
+
+        // Renders the emit set. Every candidate here already passed the codegen branch filter
+        // (every ducked argument supported and structurally self-matching), so there is no triage
+        // left to do. The site was admitted as a whole: a forwarding method that ducks only some
+        // of its failing arguments could never bind.
         private static void Execute(SourceProductionContext context, ImmutableArray<CandidateModel> candidates)
         {
             if (candidates.IsDefaultOrEmpty) return;
 
-            var allExtensions = new List<CandidateModel>();
+            var allExtensions = new List<CandidateModel>(candidates.Length);
             var interfaceInfo = new Dictionary<string, InterfaceInfo>(StringComparer.Ordinal);
             var concreteInfo = new Dictionary<string, ConcreteInfo>(StringComparer.Ordinal);
 
             foreach (var candidate in candidates)
             {
-                ProcessCandidate(context, candidate, allExtensions, interfaceInfo, concreteInfo);
+                allExtensions.Add(candidate);
+                foreach (var arg in candidate.DuckedArgs)
+                {
+                    RegisterInterface(interfaceInfo, arg);
+                    RegisterConcrete(concreteInfo, arg);
+                }
             }
-
-            if (allExtensions.Count == 0) return;
 
             var possibleMatches = ComputeMatches(interfaceInfo, concreteInfo);
             new ProxyEmitter(possibleMatches, interfaceInfo).Emit(context, allExtensions);
         }
 
-        // Sort one candidate into the emit set (every ducked argument structurally self-matches),
-        // a diagnostic (an unmatched Duck<T> or an unsupported member), or silent drop (an
-        // implicit method-argument duck with an unmatched argument, where the original call error
-        // already stands). The site is bridged or dropped as a whole: a forwarding method that
-        // ducks only some of its failing arguments could never bind.
-        private static void ProcessCandidate(
-            SourceProductionContext context, CandidateModel candidate,
-            List<CandidateModel> allExtensions,
-            Dictionary<string, InterfaceInfo> interfaceInfo,
-            Dictionary<string, ConcreteInfo> concreteInfo)
+        // One candidate of the diagnostics branch, one report: an unsupported interface member
+        // (NTF002/NTF003 - see ReportUnsupported), or an explicit Duck<T> with no structural
+        // match (NTF001). An implicit method-argument duck with an unmatched argument reports
+        // nothing - the original call error already stands - and never reaches this branch.
+        private static void ReportDiagnostic(SourceProductionContext context, CandidateModel candidate)
         {
             if (candidate.DuckedArgs.Any(a => a.UnsupportedMemberName != null))
             {
                 ReportUnsupported(context, candidate);
-                return;
             }
-
-            if (candidate.DuckedArgs.Any(a => !a.IsSelfMatch))
+            else if (candidate.IsDuckCall && candidate.DuckedArgs.Any(a => !a.IsSelfMatch))
             {
-                if (candidate.IsDuckCall)
-                {
-                    var arg = candidate.DuckedArgs[0];
-                    context.ReportDiagnostic(Diagnostic.Create(
-                        NoStructuralMatch, candidate.ToLocation(),
-                        arg.UnderlyingFq, arg.InterfaceFq));
-                }
-                return;
-            }
-
-            allExtensions.Add(candidate);
-            foreach (var arg in candidate.DuckedArgs)
-            {
-                RegisterInterface(interfaceInfo, arg);
-                RegisterConcrete(concreteInfo, arg);
+                var arg = candidate.DuckedArgs[0];
+                context.ReportDiagnostic(Diagnostic.Create(
+                    NoStructuralMatch, candidate.ToLocation(),
+                    arg.UnderlyingFq, arg.InterfaceFq));
             }
         }
 

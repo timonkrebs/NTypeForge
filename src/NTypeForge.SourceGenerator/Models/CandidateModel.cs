@@ -44,8 +44,13 @@ namespace NTypeForge.SourceGenerator.Models
         public TextSpan DiagSpan { get; }
         public LinePositionSpan DiagLineSpan { get; }
 
-        // Single canonical key driving value equality. Includes every field that affects the
-        // generated output or a reported diagnostic, so equal keys are safe to dedupe/cache.
+        // Canonical keys driving value equality. CodegenKey covers every field that affects the
+        // generated source; Key adds the diagnostic location on top, so it also covers reported
+        // diagnostics. The pipeline's diagnostics branch compares full Keys (a moved site must
+        // re-report at its fresh location) while the codegen branch compares CodegenKeys via
+        // CodegenComparer (a moved site emits identical code, so it must not invalidate emission).
+        // Equal keys are safe to dedupe/cache.
+        public string CodegenKey { get; }
         public string Key { get; }
 
         public CandidateModel(
@@ -77,10 +82,11 @@ namespace NTypeForge.SourceGenerator.Models
             DiagFilePath = diagFilePath;
             DiagSpan = diagSpan;
             DiagLineSpan = diagLineSpan;
-            Key = BuildKey();
+            CodegenKey = BuildCodegenKey();
+            Key = string.Join("|", CodegenKey, DiagFilePath ?? "", DiagSpan.Start, DiagSpan.Length);
         }
 
-        private string BuildKey()
+        private string BuildCodegenKey()
         {
             var prms = string.Join(",", OriginalParameters.Select(p => p.Key));
             var tps = string.Join(",", OriginalTypeParameters);
@@ -93,8 +99,7 @@ namespace NTypeForge.SourceGenerator.Models
                 args, IsStatic, IsDuckCall,
                 OriginalMethodName, OriginalContainingTypeFq, OriginalIsExtensionMethod,
                 OriginalReturnTypeFq, OriginalReturnsVoid, prms,
-                OriginalArity, tps, constraints,
-                DiagFilePath ?? "", DiagSpan.Start, DiagSpan.Length);
+                OriginalArity, tps, constraints);
         }
 
         public Location ToLocation()
@@ -105,5 +110,18 @@ namespace NTypeForge.SourceGenerator.Models
         public bool Equals(CandidateModel? other) => other != null && Key == other.Key;
         public override bool Equals(object? obj) => Equals(obj as CandidateModel);
         public override int GetHashCode() => Key.GetHashCode();
+
+        // Location-insensitive equality for the codegen branch of the pipeline. When the comparer
+        // reports two models equal, the incremental driver keeps the previously cached instance -
+        // whose stale location is harmless there, because emission never reads the Diag* fields.
+        public static IEqualityComparer<CandidateModel> CodegenComparer { get; } = new CodegenKeyComparer();
+
+        private sealed class CodegenKeyComparer : IEqualityComparer<CandidateModel>
+        {
+            public bool Equals(CandidateModel? x, CandidateModel? y)
+                => ReferenceEquals(x, y) || (x != null && y != null && x.CodegenKey == y.CodegenKey);
+
+            public int GetHashCode(CandidateModel obj) => obj.CodegenKey.GetHashCode();
+        }
     }
 }
