@@ -226,6 +226,34 @@ public class CodegenValidityTests
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
 
+    [Theory]
+    [InlineData("ref")]
+    [InlineData("out")]
+    [InlineData("in")]
+    public void MethodArgumentDucking_ByRefInterfaceParameter_IsNotRewired(string modifier)
+    {
+        var source = $$"""
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public void H({{modifier}} ICalc c) { }
+                    public void M()
+                    {
+                        var m = new Mgr();
+                        var a = new Adder();
+                        m.H({{modifier}} a);
+                    }
+                }
+            }
+            """;
+
+        Assert.DoesNotContain("DuckTypingExtensions", GeneratorTestHarness.GetGeneratedText(source));
+    }
+
     [Fact]
     public void MethodArgumentDucking_WithMultipleGenericMethodInstantiations_EmitsCompilableCode()
     {
