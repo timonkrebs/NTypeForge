@@ -358,7 +358,14 @@ namespace NTypeForge.SourceGenerator
         {
             if (paramIndex < 0) return false;
 
-            var paramType = candidate.Parameters[paramIndex].Type;
+            var parameter = candidate.Parameters[paramIndex];
+            // Ducking rewrites the failed call by replacing the argument expression with a freshly
+            // constructed proxy. That is only valid for by-value parameters: ref/out/in parameters
+            // require a variable passed with the corresponding modifier, and a generated proxy
+            // temporary cannot be used to preserve those semantics.
+            if (parameter.RefKind != RefKind.None) return false;
+
+            var paramType = parameter.Type;
             if (paramType == null || paramType.TypeKind != TypeKind.Interface) return false;
 
             var argFact = argFacts[syntaxIndex] ??=
