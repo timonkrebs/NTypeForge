@@ -48,8 +48,10 @@ namespace NTypeForge.SourceGenerator
         // Only public members count: the proxy forwards `_instance.Member`, which would not
         // compile against a private/protected/internal member (CS0122/CS0272), so a non-public
         // member must never make the type appear to structurally match.
-        // Keys are built via the key-only fast paths (no *Sig carriers): the surface side never
-        // renders a member, it only matches, so the render-ready data would be thrown away.
+        // Methods read their key off ToMethodSig(method).CompatKey, so the method-key formula lives
+        // in one place (it must normalize generic type parameters); properties, indexers, and events
+        // enumerate keys via the static CompatKeyFor helpers, since one member can satisfy several
+        // requirement keys at once (the get/set property above).
         private static IEnumerable<string> SurfaceKeysForMember(ISymbol member, Func<ITypeSymbol, string> fq)
         {
             // Static members are excluded: a proxy forwards `_instance.Member`, which does not
@@ -58,7 +60,7 @@ namespace NTypeForge.SourceGenerator
             switch (member)
             {
                 case IMethodSymbol { MethodKind: MethodKind.Ordinary, DeclaredAccessibility: Accessibility.Public, IsStatic: false } method:
-                    return new[] { MemberSignatures.MethodCompatKey(method, fq) };
+                    return new[] { MemberSignatures.ToMethodSig(method).CompatKey };
                 case IPropertySymbol { IsIndexer: true, IsStatic: false } indexer:
                     return IndexerSurfaceKeys(indexer, fq);
                 case IPropertySymbol { IsStatic: false } prop:
@@ -73,7 +75,7 @@ namespace NTypeForge.SourceGenerator
         private static IEnumerable<string> IndexerSurfaceKeys(IPropertySymbol indexer, Func<ITypeSymbol, string> fq)
         {
             var typeFq = fq(indexer.Type);
-            var shape = MemberSignatures.ParameterShape(indexer.Parameters, fq);
+            var shape = ParamSig.Shape(indexer.Parameters.Select(MemberSignatures.ToParamSig).ToList());
             var canGet = indexer.GetMethod is { DeclaredAccessibility: Accessibility.Public };
             var canSet = indexer.SetMethod is { DeclaredAccessibility: Accessibility.Public };
             if (canGet) yield return IndexerSig.CompatKeyFor(typeFq, shape, true, false);
