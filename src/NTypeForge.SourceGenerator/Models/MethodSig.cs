@@ -133,8 +133,8 @@ namespace NTypeForge.SourceGenerator.Models
         public static string CompatKeyFor(string typeFq, IReadOnlyList<ParamSig> parameters, bool hasGet, bool hasSet)
             => CompatKeyFor(typeFq, ParamSig.Shape(parameters), hasGet, hasSet);
 
-        // Shape-string core, shared by the constructor and the surface scan (which passes
-        // ParamSig.Shape of the indexer's parameters).
+        // Shape-string core, so the surface scan can also skip materializing ParamSigs (see
+        // MemberSignatures.ParameterShape).
         public static string CompatKeyFor(string typeFq, string parameterShape, bool hasGet, bool hasSet)
             => $"Indexer:{typeFq}:[{parameterShape}]:{(hasGet ? "G" : "")}:{(hasSet ? "S" : "")}";
     }
