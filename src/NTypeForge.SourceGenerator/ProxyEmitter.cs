@@ -550,21 +550,20 @@ namespace NTypeForge.SourceGenerator
             string underlyingMinimalName, string underlyingFq, string interfaceMinimalName, string interfaceFq)
             => $"{Sanitize(underlyingMinimalName)}_{Sanitize(interfaceMinimalName)}_Proxy_{StableHash(underlyingFq + "|" + interfaceFq)}";
 
-        // A deterministic 32-bit FNV-1a hash rendered as hex. string.GetHashCode is randomized per
-        // process, which would break the generator's required determinism; this is stable across
-        // runs and platforms.
+        // A deterministic SHA-256 hash (truncated to 32 hex chars) for collision resistance.
+        // string.GetHashCode is randomized per process, which would break the generator's required
+        // determinism; this is stable across runs and platforms.
         private static string StableHash(string value)
         {
-            unchecked
+            using var sha = global::System.Security.Cryptography.SHA256.Create();
+            var bytes = global::System.Text.Encoding.UTF8.GetBytes(value);
+            var hash = sha.ComputeHash(bytes);
+            var sb = new StringBuilder(32);
+            for (int i = 0; i < 16; i++)
             {
-                uint hash = 2166136261;
-                foreach (var c in value)
-                {
-                    hash ^= c;
-                    hash *= 16777619;
-                }
-                return hash.ToString("x8");
+                sb.Append(hash[i].ToString("x2"));
             }
+            return sb.ToString();
         }
     }
 }
