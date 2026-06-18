@@ -445,21 +445,6 @@ dotnet build
 dotnet test
 ```
 
-### Cognitive Complexity gate
-
-The repo ships an **opt-in** [SonarSource Cognitive Complexity](https://www.sonarsource.com/docs/CognitiveComplexity.pdf)
-check (rule `S3776`, per-method threshold **15**). Normal builds are unaffected; to
-measure it locally:
-
-```bash
-dotnet build -p:MeasureCognitiveComplexity=true
-```
-
-This enables `SonarAnalyzer.CSharp` with only `S3776` (see
-[`Directory.Build.props`](Directory.Build.props) and [`SonarLint.xml`](SonarLint.xml)).
-CI runs it as a separate `cognitive-complexity` job that escalates the warning to an
-error, so any method above 15 fails the build.
-
 ### Benchmarks
 
 [`bench/NTypeForge.Benchmarks`](bench/NTypeForge.Benchmarks) measures the compile-time
