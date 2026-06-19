@@ -44,3 +44,37 @@ jobs:
         dotnet-version: 10.0.x
     - name: Cognitive Complexity gate (S3776 <= 15)
       run: dotnet build -p:MeasureCognitiveComplexity=true -p:WarningsAsErrors=S3776
+
+  pack:
+    # Smoke-test the NuGet package: pack the runtime project (which also packs the generator into
+    # analyzers/dotnet/cs) and assert the produced .nupkg actually contains both the runtime
+    # assembly and the generator in the analyzer path - the layout a consuming project needs. This
+    # catches a broken analyzer-packing setup here, before a release ships it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+    - name: Pack
+      run: dotnet pack src/NTypeForge/NTypeForge.csproj -c Release -o ${{ runner.temp }}/artifacts
+    - name: Verify package layout
+      shell: bash
+      run: |
+        pkg=$(ls ${{ runner.temp }}/artifacts/NTypeForge.*.nupkg | head -1)
+        echo "Inspecting $pkg"
+        contents=$(unzip -Z1 "$pkg")
+        echo "$contents"
+        check() { echo "$contents" | grep -qx "$1" || { echo "::error::missing from package: $1"; exit 1; }; }
+        check 'lib/net10.0/NTypeForge.dll'
+        check 'analyzers/dotnet/cs/NTypeForge.SourceGenerator.dll'
+        check 'README.md'
+        echo 'Package layout OK.'
+    - name: Upload package
+      uses: actions/upload-artifact@v4
+      with:
+        name: nupkg
+        path: ${{ runner.temp }}/artifacts/*nupkg
