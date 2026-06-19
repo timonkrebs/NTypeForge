@@ -555,15 +555,16 @@ namespace NTypeForge.SourceGenerator
         // runs and platforms.
         private static string StableHash(string value)
         {
-            unchecked
+            using (var sha256 = System.Security.Cryptography.SHA256.Create())
             {
-                uint hash = 2166136261;
-                foreach (var c in value)
+                var bytes = System.Text.Encoding.UTF8.GetBytes(value);
+                var hash = sha256.ComputeHash(bytes);
+                var sb = new System.Text.StringBuilder(32);
+                for (int i = 0; i < 16; i++)
                 {
-                    hash ^= c;
-                    hash *= 16777619;
+                    sb.Append(hash[i].ToString("x2"));
                 }
-                return hash.ToString("x8");
+                return sb.ToString();
             }
         }
     }
