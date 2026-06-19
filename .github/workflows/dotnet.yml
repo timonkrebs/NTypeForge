@@ -52,7 +52,7 @@ jobs:
         cat "${{ runner.temp }}/coverage/report/SummaryGithub.md" >> "$GITHUB_STEP_SUMMARY"
     - name: Upload coverage report
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: coverage
         path: ${{ runner.temp }}/coverage/report
@@ -117,7 +117,7 @@ jobs:
         check 'README.md'
         echo 'Package layout OK.'
     - name: Upload package
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: nupkg
         path: ${{ runner.temp }}/artifacts/*nupkg
