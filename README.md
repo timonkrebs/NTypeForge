@@ -103,9 +103,22 @@ In every project that *consumes* NTypeForge, set the language version to preview
 
 ## Installation
 
-NTypeForge is not published to NuGet yet. Reference both projects directly. Note
-the **two** references: the runtime library plus the source generator wired in as an
-analyzer.
+NTypeForge ships as a **single NuGet package** that bundles the runtime library and the
+source generator (wired in as an analyzer) together, so consuming it is one reference.
+
+> **Not on nuget.org yet.** The package is built and smoke-tested in CI but isn't pushed
+> to a public feed. Until it is, consume it from source with the project references below.
+
+Once published, a single package reference pulls in both the runtime and the generator:
+
+```xml
+<ItemGroup>
+  <PackageReference Include="NTypeForge" Version="0.1.0-preview.1" />
+</ItemGroup>
+```
+
+To consume **from source** (the current path), reference **both** projects — the runtime
+library plus the source generator wired in as an analyzer:
 
 ```xml
 <ItemGroup>
