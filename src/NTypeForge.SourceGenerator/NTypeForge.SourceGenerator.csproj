@@ -8,9 +8,17 @@
     <IsRoslynComponent>true</IsRoslynComponent>
     <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
     <CompilerGeneratedFilesOutputPath>Generated</CompilerGeneratedFilesOutputPath>
-    <!-- RS2008: analyzer release tracking is for shipped analyzer packages; not applicable here. -->
-    <NoWarn>$(NoWarn);RS2008</NoWarn>
   </PropertyGroup>
+
+  <!--
+    Analyzer release tracking for the shipped diagnostics (NTF001-003). The two AnalyzerReleases
+    files pin each diagnostic's ID, category, and severity across package versions; their presence
+    satisfies RS2008, so it no longer needs suppressing.
+  -->
+  <ItemGroup>
+    <AdditionalFiles Include="AnalyzerReleases.Shipped.md" />
+    <AdditionalFiles Include="AnalyzerReleases.Unshipped.md" />
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.CodeAnalysis.Analyzers">
