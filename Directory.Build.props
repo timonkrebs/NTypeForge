@@ -26,6 +26,25 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
 
+  <!--
+    Shared NuGet package metadata. Inert for every project except the runtime NTypeForge project,
+    which is the single shipping package (it sets IsPackable=true plus the package identity). The
+    default IsPackable=false here keeps the test/benchmark/generator projects from ever packing.
+  -->
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <Authors>Timon Krebs</Authors>
+    <Company>Timon Krebs</Company>
+    <Product>NTypeForge</Product>
+    <Copyright>Copyright © 2026 Timon Krebs</Copyright>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/timonkrebs/NTypeForge</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/timonkrebs/NTypeForge</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <PackageTags>duck-typing;structural-typing;source-generator;roslyn;codegen;proxy</PackageTags>
+  </PropertyGroup>
+
   <ItemGroup Condition="'$(MeasureCognitiveComplexity)' == 'true'">
     <!-- Pinned, not `*`: a floating analyzer version can change S3776 scoring and break CI with no
          code change. Bump deliberately. -->

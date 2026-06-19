@@ -1,9 +1,56 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
+
+  <!--
+    NTypeForge ships as a single NuGet package: the net10.0 runtime types (IProxy, DuckExtensions)
+    in lib/, plus the source generator packed into analyzers/dotnet/cs (see the generator
+    ProjectReference and the _PackNTypeForgeGenerator target below). A consumer references this one
+    package and gets both the runtime surface and the compile-time generator.
+  -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>NTypeForge</PackageId>
+    <Version>0.1.0-preview.1</Version>
+    <Description>Structural (duck) typing for C#, generated at compile time. A Roslyn incremental source generator spots calls that pass a structurally-matching type where an interface is expected, generates a tiny proxy, and rewires the call - no reflection, no hand-written adapters. Experimental: relies on C# 14 preview extension members.</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The README rendered on the package page. -->
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!--
+    Build the generator and capture its output DLL without taking a compile-time reference or
+    emitting a NuGet dependency on it (ReferenceOutputAssembly=false + PrivateAssets=all). The
+    custom OutputItemType lands the built path in @(_NTypeForgeGenerator) for the pack target.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\NTypeForge.SourceGenerator\NTypeForge.SourceGenerator.csproj"
+                      ReferenceOutputAssembly="false"
+                      OutputItemType="_NTypeForgeGenerator"
+                      PrivateAssets="all" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);_PackNTypeForgeGenerator</TargetsForTfmSpecificContentInPackage>
+  </PropertyGroup>
+
+  <!-- Place the generator where Roslyn discovers analyzers in a consuming project. -->
+  <Target Name="_PackNTypeForgeGenerator" DependsOnTargets="ResolveProjectReferences">
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="@(_NTypeForgeGenerator)">
+        <PackagePath>analyzers/dotnet/cs</PackagePath>
+      </TfmSpecificPackageFile>
+    </ItemGroup>
+  </Target>
 
 </Project>
