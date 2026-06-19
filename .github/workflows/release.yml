@@ -1,0 +1,44 @@
+name: Release
+
+# Publish a GitHub Release from a version tag. Tag a commit on green `main` as `vX.Y.Z`
+# (e.g. `v0.1.0-preview.1`) and push the tag; this packs that version and attaches the
+# .nupkg/.snupkg to a GitHub Release. The tag (minus the leading `v`) IS the package version, so
+# it is the single source of truth - no need to bump the csproj first. A tag with a pre-release
+# suffix (a `-`, e.g. `-preview.1`) is published as a GitHub pre-release.
+on:
+  push:
+    tags: [ "v*" ]
+
+# Needs write access to create the Release; the build workflow stays read-only.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 10.0.x
+    - name: Pack (version from tag)
+      shell: bash
+      run: |
+        version="${GITHUB_REF_NAME#v}"
+        echo "Packing version $version"
+        dotnet pack src/NTypeForge/NTypeForge.csproj -c Release -p:Version="$version" -o "${{ runner.temp }}/artifacts"
+    - name: Create GitHub Release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: |
+        prerelease=""
+        case "$GITHUB_REF_NAME" in *-*) prerelease="--prerelease";; esac
+        gh release create "$GITHUB_REF_NAME" \
+          "${{ runner.temp }}"/artifacts/*nupkg \
+          --title "$GITHUB_REF_NAME" \
+          --generate-notes \
+          $prerelease
