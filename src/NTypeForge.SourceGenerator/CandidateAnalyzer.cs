@@ -81,9 +81,8 @@ namespace NTypeForge.SourceGenerator
                         if (!IsTypeAccessibilityUsable(current.DeclaredAccessibility)) return false;
                     }
                     return true;
-                case ITypeParameterSymbol:
-                    return true;
                 default:
+                    // Type parameters, dynamic, etc.: nothing the generated code couldn't name.
                     return true;
             }
         }

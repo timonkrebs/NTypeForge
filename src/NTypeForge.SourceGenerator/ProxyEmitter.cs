@@ -243,40 +243,17 @@ namespace NTypeForge.SourceGenerator
                 if (!string.IsNullOrEmpty(constraint)) sb.AppendLine($"                {constraint}");
             }
             sb.AppendLine("            {");
-            if (candidate.DuckedArgs.Count == 1)
-                EmitSingleArgForwardingBody(sb, candidate, targetFullName, receiver, methodName, typeParams);
-            else
-                EmitMultiArgForwardingBody(sb, candidate, targetFullName, receiver, methodName, typeParams);
+            EmitForwardingBody(sb, candidate, targetFullName, receiver, methodName, typeParams);
             sb.AppendLine("            }");
         }
 
-        // One ducked argument: each unwrap branch returns the forwarded call directly, with the
-        // direct wrap as the unconditional fall-through.
-        private void EmitSingleArgForwardingBody(
-            StringBuilder sb, CandidateModel candidate, string targetFullName, string receiver, string methodName, string typeParams)
-        {
-            var arg = candidate.DuckedArgs[0];
-            var parameters = candidate.OriginalParameters;
-            var argName = SymbolNames.Escape(parameters[arg.ArgumentIndex].Name);
-
-            string CallArgs(string argReplacement)
-                => ForwardedCallArgs(parameters, idx => idx == arg.ArgumentIndex ? argReplacement : null);
-
-            var localPrefix = SafeLocalPrefix("__ntf_c", TakenNames(parameters, receiver));
-            EmitForwardingUnwrapBranches(sb, candidate, arg, argName, targetFullName, receiver, methodName, typeParams, CallArgs, localPrefix);
-
-            // Direct wrap fallback; see the note in EmitDuckMethod for the cross-assembly
-            // double-wrap boundary (recoverable via TryUnbox/Unbox).
-            var directCall = OriginalCall(candidate, targetFullName, receiver, methodName, typeParams, CallArgs(DirectWrap(arg, argName)));
-            sb.AppendLine($"                {ReturnStatement(candidate.OriginalReturnsVoid, directCall)}");
-        }
-
-        // Several ducked arguments: each argument's proxy is resolved into an interface-typed
-        // local first (its unwrap branches run independently of the other arguments'), then one
-        // forwarding call passes them all. Returning from inside the unwrap branches - as the
-        // single-argument body does - would need a branch per combination of the arguments'
-        // unwrap outcomes.
-        private void EmitMultiArgForwardingBody(
+        // Resolves each ducked argument's proxy into a local (a concrete argument wraps inline; an
+        // interface-typed one runs its TryUnbox branches first), then makes one forwarding call that
+        // passes them all. Handles any arity, the single-argument case included: resolving into
+        // locals - rather than returning from inside the unwrap branches - keeps a single call site
+        // no matter how many arguments are ducked. For the common all-concrete case every argument
+        // wraps inline, so the call is emitted directly with no intermediate locals.
+        private void EmitForwardingBody(
             StringBuilder sb, CandidateModel candidate, string targetFullName, string receiver, string methodName, string typeParams)
         {
             var parameters = candidate.OriginalParameters;
@@ -299,8 +276,8 @@ namespace NTypeForge.SourceGenerator
         }
 
         // The expression producing one ducked argument's proxy: the direct wrap when the incoming
-        // value cannot be a proxy itself, otherwise a local assigned through TryUnbox branches
-        // (mirroring the single-argument unwrap branches). Counters are shared across the whole
+        // value cannot be a proxy itself, otherwise a local assigned through TryUnbox branches that
+        // unwrap an existing proxy before re-wrapping it. Counters are shared across the whole
         // method body because an `out var` in an if-condition scopes to the enclosing block.
         private string EmitArgProxyResolution(
             StringBuilder sb, DuckedArgModel arg, string argName,
@@ -322,28 +299,6 @@ namespace NTypeForge.SourceGenerator
             }
             sb.AppendLine($"                else {local} = {direct};");
             return local;
-        }
-
-        private void EmitForwardingUnwrapBranches(
-            StringBuilder sb, CandidateModel candidate, DuckedArgModel arg, string argName, string targetFullName, string receiver, string methodName, string typeParams,
-            Func<string, string> callArgs, string localPrefix)
-        {
-            // Unwrap branches only make sense when the incoming value can actually be a proxy, i.e.
-            // when its static type is an interface. For a concrete argument type they are dead
-            // branches and force a needless box, so we skip straight to the direct wrap.
-            if (!arg.ArgumentIsInterface || !_possibleMatches.TryGetValue(arg.InterfaceFq, out var matches))
-                return;
-
-            int ui = 0;
-            foreach (var m in matches)
-            {
-                var local = $"{localPrefix}{ui++}";
-                var proxy = ProxyFullName(m.Namespace, m.MinimalName, m.Fq, arg.InterfaceMinimalName, arg.InterfaceFq);
-                var call = OriginalCall(candidate, targetFullName, receiver, methodName, typeParams, callArgs($"new {proxy}({local})"));
-                sb.AppendLine($"                if ({argName}.TryUnbox<{m.Fq}>(out var {local})) {{");
-                sb.AppendLine($"                    {(candidate.OriginalReturnsVoid ? $"{call}; return;" : $"return {call};")}");
-                sb.AppendLine("                }");
-            }
         }
 
         // The forwarding call's argument list: each ducked index replaced per `replacementFor`
