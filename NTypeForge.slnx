@@ -15,4 +15,7 @@
   <Folder Name="/bench/">
     <Project Path="bench/NTypeForge.Benchmarks/NTypeForge.Benchmarks.csproj" />
   </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/NTypeForge.Sample/NTypeForge.Sample.csproj" />
+  </Folder>
 </Solution>

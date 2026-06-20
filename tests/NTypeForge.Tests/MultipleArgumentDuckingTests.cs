@@ -8,6 +8,7 @@ namespace NTypeForge.Tests;
 
 public interface ISummer { int Sum(int a, int b); }
 public interface IStamper { string Stamp(string text); }
+public interface IShouter { string Shout(string text); }
 
 // Structurally identical to ISummer; used to hand an already-proxied value into a call that
 // needs it re-ducked to ISummer.
@@ -15,6 +16,7 @@ public interface IOtherSummer { int Sum(int a, int b); }
 
 public class PlainSummer { public int Sum(int a, int b) => a + b; }
 public class PlainStamper { public string Stamp(string text) => $"[{text}]"; }
+public class PlainShouter { public string Shout(string text) => text + "!"; }
 
 public class Pipeline
 {
@@ -29,6 +31,10 @@ public class Pipeline
 
     public string RunThree(ISummer summer, string sep, IStamper stamper, IStamper again)
         => again.Stamp(stamper.Stamp(summer.Sum(2, 3).ToString()) + sep);
+
+    // Three *distinct* ducked interfaces (ISummer, IStamper, IShouter) bridged in one call.
+    public string RunThreeDistinct(ISummer summer, IStamper stamper, IShouter shouter)
+        => shouter.Shout(stamper.Stamp(summer.Sum(2, 3).ToString()));
 }
 
 public class MultipleArgumentDuckingTests
@@ -63,6 +69,18 @@ public class MultipleArgumentDuckingTests
         var result = new Pipeline().RunThree(new PlainSummer(), "!", new PlainStamper(), new PlainStamper());
 
         Assert.Equal("[[5]!]", result);
+    }
+
+    // Three different interfaces ducked in a single call - one proxy per argument, each matched to
+    // its own concrete type. Proves multi-argument ducking is neither limited to two arguments nor
+    // to repeats of one interface (RunThree reuses IStamper): here ISummer, IStamper and IShouter
+    // are all distinct, so three different proxies are generated and wrapped in one forwarding call.
+    [Fact]
+    public void DucksThreeDistinctInterfacesInOneCall()
+    {
+        var result = new Pipeline().RunThreeDistinct(new PlainSummer(), new PlainStamper(), new PlainShouter());
+
+        Assert.Equal("[5]!", result);
     }
 
     [Fact]
