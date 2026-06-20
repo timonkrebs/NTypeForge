@@ -441,6 +441,30 @@ When `Duck<T>()` targets an interface with an unsupported member it reports
 high-confidence near-miss, where it emits the [NTF003](#diagnostics) warning to
 explain why duck typing didn't kick in.
 
+### When implicit ducking is silently skipped
+
+An *implicit* call (one without `Duck<T>()`) is rewired only when there is exactly one
+unambiguous way to bridge it. Otherwise NTypeForge deliberately leaves the call alone
+**and reports no diagnostic** — you get the compiler's normal overload-resolution error
+(typically `CS1503`), exactly as if NTypeForge weren't referenced. This avoids masking
+the real error or guessing wrong:
+
+- **The ducked argument is passed by `ref`/`out`/`in`.** Ducking substitutes a freshly
+  constructed proxy for the argument, which is valid only for a by-value parameter; a
+  `ref`/`out`/`in` parameter needs a real variable of the exact type. (This is about the
+  argument *being* ducked — a `ref`/`out`/`in` parameter sitting *alongside* a ducked
+  argument is forwarded untouched, and `ref`/`out`/`in` parameters on the interface's own
+  methods are fully supported.)
+- **The call is ambiguous.** If a value structurally matches more than one candidate
+  interface — say two overloads each taking a different interface it fits — picking one
+  would be arbitrary, so the call is left for you to disambiguate.
+- **The match is incomplete.** If the concrete is missing a required member — including
+  just one argument of a multi-argument call — the site isn't bridged, since a forwarding
+  call that ducked only the matching arguments could never bind.
+
+An explicit `Duck<T>()` is the deliberate opposite: because you asked for the conversion
+by name, a missing member is a hard [NTF001](#diagnostics) error rather than silence.
+
 ---
 
 ## Diagnostics
