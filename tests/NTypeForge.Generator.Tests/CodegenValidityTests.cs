@@ -24,6 +24,35 @@ public class CodegenValidityTests
     }
 
     [Fact]
+    public void AsyncReturningMembers_EmitCompilableCode()
+    {
+        // Task / Task<T> / ValueTask<T> are ordinary return types to the proxy; this pins that the
+        // forwarding members emitted for them parse and bind (the generator adds no async/await).
+        const string source = """
+            using System.Threading.Tasks;
+            using NTypeForge;
+            namespace T
+            {
+                public interface IAsyncWorker
+                {
+                    Task RunAsync();
+                    Task<int> ComputeAsync(int seed);
+                    ValueTask<string> DescribeAsync(string name);
+                }
+                public class Worker
+                {
+                    public Task RunAsync() => Task.CompletedTask;
+                    public Task<int> ComputeAsync(int seed) => Task.FromResult(seed);
+                    public ValueTask<string> DescribeAsync(string name) => new(name);
+                }
+                public class C { public void M() { var x = new Worker().Duck<IAsyncWorker>(); } }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
     public void MethodArgumentDucking_EmitsCompilableCode()
     {
         const string source = """
