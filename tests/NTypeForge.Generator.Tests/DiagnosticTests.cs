@@ -610,4 +610,100 @@ public class DiagnosticTests
         Assert.Equal(1, GeneratorTestHarness.GetGeneratorDiagnostics(source).CountDiagnostics("NTF001"));
         Assert.Empty(GeneratorTestHarness.GetEmittedCompileErrors(source));
     }
+
+    // NTF004: a by-reference near-miss. The argument structurally matches the parameter interface,
+    // but the parameter is ref/out/in - a generated proxy can't be passed by reference - so the call
+    // can't be bridged. A Warning explains why an otherwise-matching type was rejected; no proxy is
+    // emitted and the compiler's own ref-kind error still stands.
+    [Fact]
+    public void NTF004_WhenDuckedArgumentIsRef()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M() { var m = new Mgr(); var a = new Adder(); m.H(ref a); }
+                }
+            }
+            """;
+
+        var ntf004 = GeneratorTestHarness.GetGeneratorDiagnostics(source).Single(d => d.Id == "NTF004");
+        Assert.Equal(DiagnosticSeverity.Warning, ntf004.Severity);
+        Assert.Contains("'ref'", ntf004.GetMessage());
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+        Assert.NotEmpty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void NTF004_WhenDuckedArgumentIsOut()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public void H(out ICalc c) => c = null;
+                    public void M() { var m = new Mgr(); Adder a; m.H(out a); }
+                }
+            }
+            """;
+
+        var ntf004 = GeneratorTestHarness.GetGeneratorDiagnostics(source).Single(d => d.Id == "NTF004");
+        Assert.Equal(DiagnosticSeverity.Warning, ntf004.Severity);
+        Assert.Contains("'out'", ntf004.GetMessage());
+        Assert.NotEmpty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    [Fact]
+    public void NTF004_WhenDuckedArgumentIsIn()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(in ICalc c) => c.Add(1, 2);
+                    public void M() { var m = new Mgr(); var a = new Adder(); m.H(in a); }
+                }
+            }
+            """;
+
+        var ntf004 = GeneratorTestHarness.GetGeneratorDiagnostics(source).Single(d => d.Id == "NTF004");
+        Assert.Equal(DiagnosticSeverity.Warning, ntf004.Severity);
+        Assert.Contains("'in'", ntf004.GetMessage());
+        Assert.NotEmpty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // No NTF004 when the by-ref argument doesn't even structurally match: that is an ordinary type
+    // error, not a near-miss, so NTypeForge stays completely silent (no diagnostic at all).
+    [Fact]
+    public void NTF004_NotReported_WhenByRefArgumentDoesNotStructurallyMatch()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class NotACalc { public int Other() => 0; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M() { var m = new Mgr(); var a = new NotACalc(); m.H(ref a); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
 }

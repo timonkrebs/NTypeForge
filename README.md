@@ -441,26 +441,25 @@ When `Duck<T>()` targets an interface with an unsupported member it reports
 high-confidence near-miss, where it emits the [NTF003](#diagnostics) warning to
 explain why duck typing didn't kick in.
 
-### When implicit ducking is silently skipped
+### When implicit ducking can't bridge a call
 
 An *implicit* call (one without `Duck<T>()`) is rewired only when there is exactly one
-unambiguous way to bridge it. Otherwise NTypeForge deliberately leaves the call alone
-**and reports no diagnostic** — you get the compiler's normal overload-resolution error
-(typically `CS1503`), exactly as if NTypeForge weren't referenced. This avoids masking
-the real error or guessing wrong:
+unambiguous way to bridge it. When it can't be, NTypeForge errs toward silence so it never
+masks the compiler's own overload-resolution error (typically `CS1503`):
 
-- **The ducked argument is passed by `ref`/`out`/`in`.** Ducking substitutes a freshly
-  constructed proxy for the argument, which is valid only for a by-value parameter; a
-  `ref`/`out`/`in` parameter needs a real variable of the exact type. (This is about the
-  argument *being* ducked — a `ref`/`out`/`in` parameter sitting *alongside* a ducked
-  argument is forwarded untouched, and `ref`/`out`/`in` parameters on the interface's own
-  methods are fully supported.)
+- **The ducked argument is passed by `ref`/`out`/`in`.** A generated proxy can't be passed
+  by reference (a `ref`/`out`/`in` parameter needs a real variable of the exact type), so
+  the argument can't be ducked. When it *structurally matches* the interface — a true
+  near-miss — this is surfaced as the [NTF004](#diagnostics) warning, explaining why an
+  otherwise-matching type was rejected. (This is the argument *being* ducked; a
+  `ref`/`out`/`in` parameter *alongside* a ducked argument is forwarded untouched, and
+  `ref`/`out`/`in` parameters on the interface's own methods are fully supported.)
 - **The call is ambiguous.** If a value structurally matches more than one candidate
   interface — say two overloads each taking a different interface it fits — picking one
-  would be arbitrary, so the call is left for you to disambiguate.
+  would be arbitrary, so the call is left **silent** for you to disambiguate.
 - **The match is incomplete.** If the concrete is missing a required member — including
-  just one argument of a multi-argument call — the site isn't bridged, since a forwarding
-  call that ducked only the matching arguments could never bind.
+  just one argument of a multi-argument call — the site isn't bridged (a forwarding call
+  that ducked only the matching arguments could never bind), and no diagnostic is raised.
 
 An explicit `Duck<T>()` is the deliberate opposite: because you asked for the conversion
 by name, a missing member is a hard [NTF001](#diagnostics) error rather than silence.
@@ -474,6 +473,7 @@ by name, a missing member is a hard [NTF001](#diagnostics) error rather than sil
 | **NTF001** | Error | `Duck<T>()` was used but the type does not structurally implement every member required by `T`. |
 | **NTF002** | Error | A `Duck<T>()` target interface contains a member NTypeForge cannot proxy (e.g. a `static abstract` member). |
 | **NTF003** | Warning | An implicit call's argument structurally matches the parameter interface *except* for an unsupported member, so NTypeForge couldn't bridge it — surfaced to explain why the call still fails, without masking the compiler's own error. |
+| **NTF004** | Warning | An implicit call's argument structurally matches the parameter interface, but the parameter is `ref`/`out`/`in`, so a generated proxy can't be passed — surfaced to explain why an otherwise-matching type couldn't be ducked. |
 
 ---
 

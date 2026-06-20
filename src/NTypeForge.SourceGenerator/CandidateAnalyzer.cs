@@ -24,13 +24,20 @@ namespace NTypeForge.SourceGenerator
             public readonly ITypeSymbol UnderlyingType;
             public readonly ITypeSymbol InterfaceType;
             public readonly int EmittedIndex;
+            // Set only for a ref/out/in near-miss (NTF004): the structural match is blocked because
+            // the parameter is by-reference. Null on a normal (duckable) argument.
+            public readonly string? RefKindBlocker;
+            public readonly string? BlockedParameterName;
 
-            public DuckedArgSite(ITypeSymbol argType, ITypeSymbol underlyingType, ITypeSymbol interfaceType, int emittedIndex)
+            public DuckedArgSite(ITypeSymbol argType, ITypeSymbol underlyingType, ITypeSymbol interfaceType, int emittedIndex,
+                string? refKindBlocker = null, string? blockedParameterName = null)
             {
                 ArgType = argType;
                 UnderlyingType = underlyingType;
                 InterfaceType = interfaceType;
                 EmittedIndex = emittedIndex;
+                RefKindBlocker = refKindBlocker;
+                BlockedParameterName = blockedParameterName;
             }
         }
 
@@ -47,7 +54,8 @@ namespace NTypeForge.SourceGenerator
             // resolution (Symbol == null, with candidates) can be rescued by generated proxies.
             if (symbolInfo.Symbol != null || symbolInfo.CandidateSymbols.Length == 0) return null;
 
-            return TryGetMethodArgumentDuck(invocation, semanticModel, symbolInfo, cancellationToken);
+            return TryGetMethodArgumentDuck(invocation, semanticModel, symbolInfo, cancellationToken)
+                ?? TryGetRefKindNearMiss(invocation, semanticModel, symbolInfo, cancellationToken);
         }
 
         // Matches the top-level `NTypeForge` namespace only, so a user's unrelated
@@ -259,6 +267,131 @@ namespace NTypeForge.SourceGenerator
 
             resolved.Sort((a, b) => a.EmittedIndex.CompareTo(b.EmittedIndex));
             return resolved;
+        }
+
+        // NTF004 - a ref/out/in near-miss. Runs only when the normal duck path found nothing: the
+        // argument may still be a *structural* match that simply can't be ducked because its
+        // parameter is by-reference (a generated proxy can't be passed by ref/out/in). We surface
+        // that, and only that, as a warning - mirroring NTF003's high-confidence bar: every other
+        // argument must already bind, so the ref kind is the sole blocker, and exactly one candidate
+        // overload may qualify (otherwise the call is genuinely ambiguous and we stay silent).
+        private static CandidateModel? TryGetRefKindNearMiss(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo,
+            CancellationToken cancellationToken)
+        {
+            if (invocation.Expression is not MemberAccessExpressionSyntax) return null;
+
+            var arguments = invocation.ArgumentList.Arguments;
+            var argFacts = new ArgumentDuckFact?[arguments.Count];
+
+            (IMethodSymbol Candidate, List<DuckedArgSite> Blocked)? only = null;
+            foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
+            {
+                if (candidate.ContainingType == null) continue;
+                var blocked = CollectRefKindNearMiss(semanticModel, candidate, arguments, argFacts, cancellationToken);
+                if (blocked == null) continue;
+                if (only != null) return null; // more than one near-miss interpretation: ambiguous, stay silent
+                only = (candidate, blocked);
+            }
+            if (only == null) return null;
+
+            var (chosen, blockedSites) = only.Value;
+            var target = GetForwardingTarget(invocation, semanticModel, chosen, cancellationToken);
+            if (target == null || ContainsTypeParameter(target) || !IsUsableFromGeneratedTopLevelCode(target))
+                return null;
+
+            return BuildModel(
+                invocation, target, blockedSites,
+                isStatic: chosen.IsStatic && !IsExtensionLike(chosen),
+                isDuckCall: false,
+                originalMethod: chosen);
+        }
+
+        // A candidate overload is a clean ref-kind near-miss when at least one argument maps to a
+        // ref/out/in interface parameter whose underlying type structurally satisfies it, and every
+        // other argument already binds. Returns the blocked sites, or null when it is not such a
+        // near-miss (so the call is left alone with no diagnostic).
+        private static List<DuckedArgSite>? CollectRefKindNearMiss(
+            SemanticModel semanticModel, IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments,
+            ArgumentDuckFact?[] argFacts, CancellationToken cancellationToken)
+        {
+            if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) return null;
+
+            var blocked = new List<DuckedArgSite>();
+            for (int syntaxIndex = 0; syntaxIndex < arguments.Count; syntaxIndex++)
+            {
+                var paramIndex = parameterIndices[syntaxIndex];
+                if (paramIndex < 0) return null;
+                var parameter = candidate.Parameters[paramIndex];
+                var expression = arguments[syntaxIndex].Expression;
+
+                if (IsRefKindInterfaceParameter(parameter))
+                {
+                    var site = TryBuildRefKindBlocker(
+                        semanticModel, candidate, parameter, paramIndex, expression, argFacts, syntaxIndex, cancellationToken);
+                    if (site == null) return null;
+                    blocked.Add(site.Value);
+                }
+                else if (!BindsImplicitly(semanticModel, expression, parameter.Type))
+                {
+                    return null;
+                }
+            }
+
+            return blocked.Count > 0 ? blocked : null;
+        }
+
+        private static bool IsRefKindInterfaceParameter(IParameterSymbol parameter)
+            => parameter.RefKind != RefKind.None && parameter.Type.TypeKind == TypeKind.Interface;
+
+        // The argument filling a ref/out/in interface parameter, as a blocked DuckedArgSite, when it
+        // is a clean structural match the generated code could name; otherwise null (which makes the
+        // whole overload a non-near-miss, so NTF004 does not fire on it).
+        private static DuckedArgSite? TryBuildRefKindBlocker(
+            SemanticModel semanticModel, IMethodSymbol candidate, IParameterSymbol parameter, int paramIndex,
+            ExpressionSyntax expression, ArgumentDuckFact?[] argFacts, int syntaxIndex, CancellationToken cancellationToken)
+        {
+            var argFact = argFacts[syntaxIndex] ??= ComputeArgumentDuckFact(semanticModel, expression, cancellationToken);
+            if (argFact.Type == null || argFact.Underlying == null) return null;
+            if (ContainsTypeParameter(argFact.Type) || ContainsTypeParameter(argFact.Underlying) || ContainsTypeParameter(parameter.Type))
+                return null;
+            if (!IsUsableFromGeneratedTopLevelCode(argFact.Underlying) || !IsUsableFromGeneratedTopLevelCode(parameter.Type))
+                return null;
+            if (!StructurallyMatches(parameter.Type, argFact.Underlying))
+                return null;
+
+            return new DuckedArgSite(
+                argFact.Type, argFact.Underlying, parameter.Type, EmittedParameterIndex(candidate, paramIndex),
+                refKindBlocker: RefKindKeyword(parameter.RefKind), blockedParameterName: parameter.Name);
+        }
+
+        private static bool BindsImplicitly(SemanticModel semanticModel, ExpressionSyntax expression, ITypeSymbol type)
+        {
+            var conversion = semanticModel.ClassifyConversion(expression, type);
+            return conversion.Exists && conversion.IsImplicit;
+        }
+
+        // Whether the underlying type structurally satisfies the interface over a fully-proxyable
+        // contract. An unsupported member is NTF002/NTF003 territory, not a ref-kind near-miss, so it
+        // disqualifies the match here.
+        private static bool StructurallyMatches(ITypeSymbol interfaceType, ITypeSymbol underlyingType)
+        {
+            var requirements = InterfaceRequirementsAnalyzer.Analyze(interfaceType);
+            if (requirements.Unsupported != null) return false;
+            var surfaceSet = new HashSet<string>(SurfaceAnalyzer.BuildSurfaceCompatKeys(underlyingType), StringComparer.Ordinal);
+            return StructuralMatch.IsSatisfiedBy(
+                requirements.Methods, requirements.Properties, requirements.Indexers, requirements.Events, surfaceSet);
+        }
+
+        private static string RefKindKeyword(RefKind kind)
+        {
+            switch (kind)
+            {
+                case RefKind.Ref: return "ref";
+                case RefKind.Out: return "out";
+                case RefKind.In: return "in";
+                default: return "ref readonly";
+            }
         }
 
         private static bool IsExtensionLike(IMethodSymbol method)
@@ -560,7 +693,9 @@ namespace NTypeForge.SourceGenerator
                 eventRequirements: requirements.Events,
                 underlyingSurfaceCompatKeys: surface,
                 isSelfMatch: isSelfMatch,
-                unsupportedMemberName: requirements.Unsupported);
+                unsupportedMemberName: requirements.Unsupported,
+                refKindBlocker: site.RefKindBlocker,
+                blockedParameterName: site.BlockedParameterName);
         }
 
         private static IEnumerable<IParameterSymbol> ForwardedParameters(IMethodSymbol method)

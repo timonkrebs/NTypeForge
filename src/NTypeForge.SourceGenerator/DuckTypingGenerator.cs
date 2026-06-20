@@ -43,6 +43,20 @@ namespace NTypeForge.SourceGenerator
             defaultSeverity: DiagnosticSeverity.Warning,
             isEnabledByDefault: true);
 
+        // Implicit (no Duck<T>) near-miss of a different kind: the argument structurally matches the
+        // parameter interface, but the parameter is ref/out/in, so a generated proxy can't be passed
+        // (a by-reference parameter needs a real variable of the exact type). Warning, not error -
+        // the user's own call-resolution error already stands; this only explains why duck typing
+        // couldn't bridge an otherwise-matching type. Fired only at a clean near-miss site (see
+        // CandidateAnalyzer.TryGetRefKindNearMiss), so it does not fire on ordinary type errors.
+        private static readonly DiagnosticDescriptor RefKindBlockedImplicitDuck = new DiagnosticDescriptor(
+            id: "NTF004",
+            title: "Type structurally matches but cannot be implicitly duck-typed through a by-reference parameter",
+            messageFormat: "Type '{0}' structurally matches '{1}' but cannot be implicitly duck-typed: parameter '{2}' is passed by '{3}', and a generated proxy cannot be passed by reference",
+            category: "NTypeForge",
+            defaultSeverity: DiagnosticSeverity.Warning,
+            isEnabledByDefault: true);
+
         public void Initialize(IncrementalGeneratorInitializationContext context)
         {
             // The transform resolves every duck-typing site into a value-equatable CandidateModel
@@ -67,11 +81,19 @@ namespace NTypeForge.SourceGenerator
                                    (c.IsDuckCall && c.DuckedArgs.Any(a => !a.IsSelfMatch)));
             context.RegisterSourceOutput(diagnosticCandidates, static (spc, candidate) => ReportDiagnostic(spc, candidate));
 
+            // A structural match blocked only by a ref/out/in parameter can never be ducked (a proxy
+            // can't be passed by reference), but it is a high-confidence near-miss worth a warning.
+            // Disjoint from the branch above (no unsupported member, not a Duck<T> call) and from
+            // emit below (the RefKindBlocker flag excludes it there).
+            var refKindCandidates = candidates
+                .Where(static c => c.DuckedArgs.Any(a => a.RefKindBlocker != null && a.IsSelfMatch));
+            context.RegisterSourceOutput(refKindCandidates, static (spc, candidate) => ReportRefKindNearMiss(spc, candidate));
+
             // Codegen compares by CodegenKey (location ignored): the emitted code does not depend
             // on where a site sits, so an edit that merely moves one (whitespace, unrelated code
             // above it) must not invalidate the collected array and re-emit every generated file.
             var emitCandidates = candidates
-                .Where(static c => c.DuckedArgs.All(a => a.UnsupportedMemberName == null && a.IsSelfMatch))
+                .Where(static c => c.DuckedArgs.All(a => a.UnsupportedMemberName == null && a.IsSelfMatch && a.RefKindBlocker == null))
                 .WithComparer(CandidateModel.CodegenComparer);
             context.RegisterSourceOutput(emitCandidates.Collect(), static (spc, models) => Execute(spc, models));
         }
@@ -168,6 +190,21 @@ namespace NTypeForge.SourceGenerator
         private static bool HasInstanceRequirements(DuckedArgModel arg)
             => arg.MethodRequirements.Count > 0 || arg.PropertyRequirements.Count > 0 ||
                arg.IndexerRequirements.Count > 0 || arg.EventRequirements.Count > 0;
+
+        // One NTF004 per ref/out/in-blocked argument of a near-miss site, naming the type, the
+        // interface it structurally matches, the blocking parameter, and its ref kind.
+        private static void ReportRefKindNearMiss(SourceProductionContext context, CandidateModel candidate)
+        {
+            foreach (var arg in candidate.DuckedArgs)
+            {
+                if (arg.RefKindBlocker != null && arg.IsSelfMatch)
+                {
+                    context.ReportDiagnostic(Diagnostic.Create(
+                        RefKindBlockedImplicitDuck, candidate.ToLocation(),
+                        arg.UnderlyingFq, arg.InterfaceFq, arg.BlockedParameterName, arg.RefKindBlocker));
+                }
+            }
+        }
 
         private static void RegisterInterface(Dictionary<string, InterfaceInfo> interfaceInfo, DuckedArgModel arg)
         {

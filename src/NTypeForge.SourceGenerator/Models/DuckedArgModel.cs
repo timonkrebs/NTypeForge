@@ -45,6 +45,12 @@ namespace NTypeForge.SourceGenerator.Models
         // names the offending member for the NTF002/NTF003 diagnostics.
         public string? UnsupportedMemberName { get; }
 
+        // Set only for a ref/out/in near-miss (NTF004): the argument structurally matches the
+        // interface, but the parameter is by-reference, so a generated proxy can't be passed. Holds
+        // the offending parameter's ref kind ("ref"/"out"/"in") and name for the diagnostic message.
+        public string? RefKindBlocker { get; }
+        public string? BlockedParameterName { get; }
+
         // Canonical key folded into CandidateModel.Key. Includes every field that affects the
         // generated output or a reported diagnostic.
         public string Key { get; }
@@ -59,7 +65,8 @@ namespace NTypeForge.SourceGenerator.Models
             IReadOnlyList<IndexerSig> indexerRequirements,
             IReadOnlyList<EventSig> eventRequirements,
             IReadOnlyList<string> underlyingSurfaceCompatKeys,
-            bool isSelfMatch, string? unsupportedMemberName)
+            bool isSelfMatch, string? unsupportedMemberName,
+            string? refKindBlocker = null, string? blockedParameterName = null)
         {
             ArgumentIndex = argumentIndex;
             ArgumentIsInterface = argumentIsInterface;
@@ -78,6 +85,8 @@ namespace NTypeForge.SourceGenerator.Models
             UnderlyingSurfaceCompatKeys = underlyingSurfaceCompatKeys;
             IsSelfMatch = isSelfMatch;
             UnsupportedMemberName = unsupportedMemberName;
+            RefKindBlocker = refKindBlocker;
+            BlockedParameterName = blockedParameterName;
             Key = BuildKey();
         }
 
@@ -92,7 +101,8 @@ namespace NTypeForge.SourceGenerator.Models
                 ArgumentIndex, ArgumentFq, ArgumentIsInterface,
                 UnderlyingFq, UnderlyingIsInterface, UnderlyingBaseDepth,
                 InterfaceFq, reqs, props, idxs, evts, surface,
-                IsSelfMatch, UnsupportedMemberName ?? "");
+                IsSelfMatch, UnsupportedMemberName ?? "",
+                RefKindBlocker ?? "", BlockedParameterName ?? "");
         }
     }
 }
