@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>preview</LangVersion>
+  </PropertyGroup>
+
+  <!-- Consume NTypeForge from source exactly as a package consumer would: the runtime library plus
+       the source generator wired in as an analyzer (no runtime assembly). This is the two-reference
+       shape documented in the README's Installation section. -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\NTypeForge\NTypeForge.csproj" />
+    <ProjectReference Include="..\..\src\NTypeForge.SourceGenerator\NTypeForge.SourceGenerator.csproj"
+                      OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+</Project>

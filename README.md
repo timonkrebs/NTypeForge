@@ -140,6 +140,10 @@ library plus the source generator wired in as an analyzer:
 
 ## Usage
 
+> 💡 **Runnable version:** the examples below live as a runnable program in
+> [`samples/NTypeForge.Sample`](samples/NTypeForge.Sample) — try it with
+> `dotnet run --project samples/NTypeForge.Sample`.
+
 ### 1. Pass a structurally-matching type to a method
 
 This is the headline feature shown above: just call the method. If the argument's
