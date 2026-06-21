@@ -8,6 +8,10 @@ namespace NTypeForge;
 /// </summary>
 public static class DuckExtensions
 {
+    // Maximum proxy-chain depth TryUnbox will walk before giving up. Guards pathological
+    // IProxy implementations that cycle back to themselves (e.g. Unwrapped returns `this`).
+    private const int MaxUnboxDepth = 64;
+
     /// <summary>
     /// Recovers the wrapped <typeparamref name="T"/> from a proxy, walking nested proxies. Returns
     /// <c>default</c> if <paramref name="proxy"/> neither is nor wraps a <typeparamref name="T"/>.
@@ -31,7 +35,7 @@ public static class DuckExtensions
     {
         object? current = proxy;
         int guard = 0;
-        while (current is IProxy untypedProxy && guard++ < 64)
+        while (current is IProxy untypedProxy && guard++ < MaxUnboxDepth)
         {
             if (untypedProxy.Unwrapped is T unwrapped)
             {

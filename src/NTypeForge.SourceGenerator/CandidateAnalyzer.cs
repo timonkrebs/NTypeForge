@@ -53,7 +53,7 @@ namespace NTypeForge.SourceGenerator
         // Matches the top-level `NTypeForge` namespace only, so a user's unrelated
         // `Foo.NTypeForge` namespace is not mistaken for the library's.
         private static bool IsTopLevelNTypeForgeNamespace(INamespaceSymbol? ns)
-            => ns != null && ns.Name == "NTypeForge" && (ns.ContainingNamespace == null || ns.ContainingNamespace.IsGlobalNamespace);
+            => ns != null && ns.Name == "NTypeForge" && ns.ContainingNamespace.IsGlobalNamespace;
 
         // The underlying type kinds NTypeForge can build a proxy around. A `ref struct` is excluded:
         // it can't be a field of the (non-ref) proxy class, can't be a type argument to IProxy<T>, and
@@ -133,7 +133,7 @@ namespace NTypeForge.SourceGenerator
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo,
             CancellationToken cancellationToken)
         {
-            if (!(symbolInfo.Symbol is IMethodSymbol resolved) || resolved.Name != "Duck" ||
+            if (symbolInfo.Symbol is not IMethodSymbol resolved || resolved.Name != "Duck" ||
                 !IsTopLevelNTypeForgeNamespace(resolved.ContainingNamespace) || resolved.TypeArguments.Length != 1)
                 return null;
 
@@ -181,7 +181,7 @@ namespace NTypeForge.SourceGenerator
         private static ExpressionSyntax? GetDuckInstanceExpression(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, CancellationToken cancellationToken)
         {
-            if (!(invocation.Expression is MemberAccessExpressionSyntax memberAccess)) return null;
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess) return null;
 
             var receiver = semanticModel.GetSymbolInfo(memberAccess.Expression, cancellationToken).Symbol;
             if (receiver is ITypeSymbol or INamespaceSymbol) return null;

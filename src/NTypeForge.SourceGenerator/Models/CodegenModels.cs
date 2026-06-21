@@ -23,25 +23,27 @@ namespace NTypeForge.SourceGenerator.Models
 
     // The structural requirements of one interface in render-ready primitive form. Built once per
     // interface and consumed by both structural matching (ConcreteSatisfies) and proxy emission.
+    // Mutable properties (not readonly) so callers can use object-initializer syntax.
     internal sealed class InterfaceInfo
     {
-        public string Fq = "";
-        public string MinimalName = "";
-        public IReadOnlyList<MethodSig> MethodRequirements = Array.Empty<MethodSig>();
-        public IReadOnlyList<PropertySig> PropertyRequirements = Array.Empty<PropertySig>();
-        public IReadOnlyList<IndexerSig> IndexerRequirements = Array.Empty<IndexerSig>();
-        public IReadOnlyList<EventSig> EventRequirements = Array.Empty<EventSig>();
+        public string Fq { get; set; } = "";
+        public string MinimalName { get; set; } = "";
+        public IReadOnlyList<MethodSig> MethodRequirements { get; set; } = Array.Empty<MethodSig>();
+        public IReadOnlyList<PropertySig> PropertyRequirements { get; set; } = Array.Empty<PropertySig>();
+        public IReadOnlyList<IndexerSig> IndexerRequirements { get; set; } = Array.Empty<IndexerSig>();
+        public IReadOnlyList<EventSig> EventRequirements { get; set; } = Array.Empty<EventSig>();
     }
 
     // A concrete type that can back a proxy, with the surface keys used to match it against
     // interface requirements.
+    // Mutable properties (not readonly) so callers can use object-initializer syntax.
     internal sealed class ConcreteInfo
     {
-        public string Fq = "";
-        public string Namespace = "";
-        public string MinimalName = "";
-        public int BaseDepth;
-        public HashSet<string> SurfaceKeys = new HashSet<string>(StringComparer.Ordinal);
+        public string Fq { get; set; } = "";
+        public string Namespace { get; set; } = "";
+        public string MinimalName { get; set; } = "";
+        public int BaseDepth { get; set; }
+        public HashSet<string> SurfaceKeys { get; set; } = new HashSet<string>(StringComparer.Ordinal);
     }
 
     // One proxy to emit: an underlying type adapted to an interface, plus the members to

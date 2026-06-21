@@ -12,7 +12,7 @@ namespace NTypeForge.SourceGenerator
     // CandidateModel; Initialize triages those models into two disjoint output branches
     // (diagnostics vs. emit set); Execute computes the interface->concrete match map over the
     // emit set and hands the result to ProxyEmitter for rendering.
-    [Generator]
+    [Generator(LanguageNames.CSharp)]
     public class DuckTypingGenerator : IIncrementalGenerator
     {
         private static readonly DiagnosticDescriptor NoStructuralMatch = new DiagnosticDescriptor(
