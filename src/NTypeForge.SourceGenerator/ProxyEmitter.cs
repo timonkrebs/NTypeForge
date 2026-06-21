@@ -34,26 +34,12 @@ namespace NTypeForge.SourceGenerator
             var proxiesByNamespace = new Dictionary<string, List<ProxyDecl>>(StringComparer.Ordinal);
             var added = new HashSet<string>(StringComparer.Ordinal);
 
-            void AddProxy(string uFq, string uNs, string uMin, string iFq, string iMin,
-                IReadOnlyList<MethodSig> mReqs,
-                IReadOnlyList<PropertySig> pReqs,
-                IReadOnlyList<IndexerSig> iReqs,
-                IReadOnlyList<EventSig> eReqs)
-            {
-                if (!added.Add(uFq + "|" + iFq)) return;
-                if (!proxiesByNamespace.TryGetValue(uNs, out var list))
-                {
-                    list = new List<ProxyDecl>();
-                    proxiesByNamespace[uNs] = list;
-                }
-                list.Add(new ProxyDecl(uFq, uNs, uMin, iFq, iMin, mReqs, pReqs, iReqs, eReqs));
-            }
-
             foreach (var item in allExtensions)
             {
                 foreach (var arg in item.DuckedArgs)
                 {
-                    AddProxy(arg.UnderlyingFq, arg.UnderlyingNamespace, arg.UnderlyingMinimalName,
+                    AddProxyDecl(proxiesByNamespace, added,
+                        arg.UnderlyingFq, arg.UnderlyingNamespace, arg.UnderlyingMinimalName,
                         arg.InterfaceFq, arg.InterfaceMinimalName,
                         arg.MethodRequirements, arg.PropertyRequirements, arg.IndexerRequirements, arg.EventRequirements);
                 }
@@ -63,7 +49,8 @@ namespace NTypeForge.SourceGenerator
                 var iface = _interfaceInfo[kvp.Key];
                 foreach (var concrete in kvp.Value)
                 {
-                    AddProxy(concrete.Fq, concrete.Namespace, concrete.MinimalName,
+                    AddProxyDecl(proxiesByNamespace, added,
+                        concrete.Fq, concrete.Namespace, concrete.MinimalName,
                         iface.Fq, iface.MinimalName,
                         iface.MethodRequirements, iface.PropertyRequirements, iface.IndexerRequirements, iface.EventRequirements);
                 }
@@ -90,6 +77,27 @@ namespace NTypeForge.SourceGenerator
                 // the generator.
                 context.AddSource($"{Sanitize(kvp.Key)}_Proxies_{StableHash(kvp.Key)}.g.cs", sb.ToString());
             }
+        }
+
+        // Registers a proxy declaration (underlying -> interface) into the by-namespace map,
+        // skipping duplicates. Extracted from EmitProxies to avoid a capturing local function.
+        private static void AddProxyDecl(
+            Dictionary<string, List<ProxyDecl>> proxiesByNamespace,
+            HashSet<string> added,
+            string uFq, string uNs, string uMin,
+            string iFq, string iMin,
+            IReadOnlyList<MethodSig> mReqs,
+            IReadOnlyList<PropertySig> pReqs,
+            IReadOnlyList<IndexerSig> iReqs,
+            IReadOnlyList<EventSig> eReqs)
+        {
+            if (!added.Add(uFq + "|" + iFq)) return;
+            if (!proxiesByNamespace.TryGetValue(uNs, out var list))
+            {
+                list = new List<ProxyDecl>();
+                proxiesByNamespace[uNs] = list;
+            }
+            list.Add(new ProxyDecl(uFq, uNs, uMin, iFq, iMin, mReqs, pReqs, iReqs, eReqs));
         }
 
         private void EmitExtensions(SourceProductionContext context, List<CandidateModel> allExtensions)
@@ -322,7 +330,11 @@ namespace NTypeForge.SourceGenerator
         {
             if (candidate.OriginalIsExtensionMethod)
             {
-                return $"{candidate.OriginalContainingTypeFq}.{methodName}{typeParams}({receiver}, {args})";
+                // Guard the trailing-comma edge case: when all non-receiver parameters were ducked
+                // and replaced, `args` may be empty. In that case emit just `(receiver)` rather
+                // than the syntactically invalid `(receiver, )`.
+                var argList = string.IsNullOrEmpty(args) ? receiver : $"{receiver}, {args}";
+                return $"{candidate.OriginalContainingTypeFq}.{methodName}{typeParams}({argList})";
             }
 
             var callReceiver = candidate.IsStatic ? targetFullName : receiver;
@@ -380,7 +392,7 @@ namespace NTypeForge.SourceGenerator
                 if (!string.IsNullOrEmpty(constraint)) sb.AppendLine($"            {constraint}");
             }
             sb.AppendLine("        {");
-            sb.AppendLine($"            {ReturnStatement(method.ReturnsVoid, $"__ntf_instance.{name}{typeParams}({argsStr})")}");
+            sb.AppendLine($"            {ReturnStatement(method.ReturnsVoid, $"__ntf_instance.{name}{typeParams}({argsStr})")} ");
             sb.AppendLine("        }");
         }
 
@@ -508,6 +520,8 @@ namespace NTypeForge.SourceGenerator
         // A deterministic SHA-256 hash (truncated to 32 hex chars) for collision resistance.
         // string.GetHashCode is randomized per process, which would break the generator's required
         // determinism; this is stable across runs and platforms.
+        // NOTE: targets netstandard2.0, so SHA256.HashData and Convert.ToHexString are unavailable;
+        // the manual loop is intentional and must not be changed to those APIs.
         private static string StableHash(string value)
         {
             using var sha = global::System.Security.Cryptography.SHA256.Create();
