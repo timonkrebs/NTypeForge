@@ -92,11 +92,38 @@ namespace NTypeForge.SourceGenerator
                accessibility == Accessibility.Internal ||
                accessibility == Accessibility.ProtectedOrInternal;
 
-        private static bool IsEffectivelyPublic(ITypeSymbol type)
+        private static bool IsEffectivelyPublic(ITypeSymbol type, IMethodSymbol? originalMethod)
         {
+            if (originalMethod != null)
+            {
+                if (originalMethod.DeclaredAccessibility != Accessibility.Public && originalMethod.DeclaredAccessibility != Accessibility.NotApplicable) return false;
+                for (var current = originalMethod.ContainingType; current != null; current = current.ContainingType)
+                {
+                    if (current.DeclaredAccessibility != Accessibility.Public && current.DeclaredAccessibility != Accessibility.NotApplicable) return false;
+                }
+
+                if (!IsEffectivelyPublic(originalMethod.ReturnType, null)) return false;
+
+                foreach (var param in originalMethod.Parameters)
+                {
+                    if (!IsEffectivelyPublic(param.Type, null)) return false;
+                }
+            }
+
             for (var current = type; current != null; current = current.ContainingType)
             {
-                if (current.DeclaredAccessibility != Accessibility.Public) return false;
+                if (current.DeclaredAccessibility != Accessibility.Public && current.DeclaredAccessibility != Accessibility.NotApplicable) return false;
+            }
+            if (type is INamedTypeSymbol named)
+            {
+                foreach (var arg in named.TypeArguments)
+                {
+                    if (!IsEffectivelyPublic(arg, null)) return false;
+                }
+            }
+            else if (type is IArrayTypeSymbol array)
+            {
+                if (!IsEffectivelyPublic(array.ElementType, null)) return false;
             }
             return true;
         }
@@ -515,7 +542,7 @@ namespace NTypeForge.SourceGenerator
                 targetNamespace: SymbolNames.NamespaceOf(target),
                 targetMinimalName: SymbolNames.MinimalName(target),
                 targetIsInterface: target.TypeKind == TypeKind.Interface,
-                targetIsPublic: IsEffectivelyPublic(target),
+                targetIsPublic: IsEffectivelyPublic(target, originalMethod),
                 duckedArgs: argModels,
                 isStatic: isStatic,
                 isDuckCall: isDuckCall,
