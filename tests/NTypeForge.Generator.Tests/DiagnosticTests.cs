@@ -934,4 +934,28 @@ public class DiagnosticTests
 
         Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
     }
+
+    // No NTF004 when a struct field is reached through a readonly receiver: `readonly Holder _h;
+    // H(ref _h.Value)` is a readonly location, an additional error beyond the ref duck.
+    [Fact]
+    public void NTF004_NotReported_WhenRefArgumentIsFieldOfReadonlyStruct()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public struct Holder { public Adder Value; }
+                public class Mgr
+                {
+                    private readonly Holder _h;
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M() { H(ref _h.Value); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
 }

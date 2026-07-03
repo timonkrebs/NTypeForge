@@ -412,14 +412,19 @@ namespace NTypeForge.SourceGenerator
         }
 
         // Whether the expression can be passed with the given by-reference kind. ref/out require a
-        // writable variable (not a readonly field, an in-parameter, or a ref-readonly local); in
-        // accepts any readable variable. Rvalues, method/property results, and constants qualify for
-        // none, so a structurally-matching type in one of those positions is a plain ref-argument
-        // error rather than a ducking near-miss.
+        // writable variable; in accepts any readable variable. Rvalues, method/property results, and
+        // constants qualify for none, so a structurally-matching type in one of those positions is a
+        // plain ref-argument error rather than a ducking near-miss.
         private static bool IsRefKindAssignable(
             SemanticModel semanticModel, ExpressionSyntax expression, RefKind refKind, CancellationToken cancellationToken)
+            => IsVariable(semanticModel, expression, requiresWritable: refKind == RefKind.Ref || refKind == RefKind.Out, cancellationToken);
+
+        // A ref/out target must be writable along its whole access path; an in target only needs to
+        // be readable. Locals and parameters are constrained by their own ref kind (a ref-readonly
+        // local or in-parameter is not writable); fields defer to IsFieldVariable.
+        private static bool IsVariable(
+            SemanticModel semanticModel, ExpressionSyntax expression, bool requiresWritable, CancellationToken cancellationToken)
         {
-            bool requiresWritable = refKind == RefKind.Ref || refKind == RefKind.Out;
             switch (semanticModel.GetSymbolInfo(expression, cancellationToken).Symbol)
             {
                 case ILocalSymbol local:
@@ -428,10 +433,26 @@ namespace NTypeForge.SourceGenerator
                     return !requiresWritable ||
                            parameter.RefKind == RefKind.None || parameter.RefKind == RefKind.Ref || parameter.RefKind == RefKind.Out;
                 case IFieldSymbol field:
-                    return !field.IsConst && (!requiresWritable || !field.IsReadOnly);
+                    return IsFieldVariable(semanticModel, field, expression, requiresWritable, cancellationToken);
                 default:
                     return false;
             }
+        }
+
+        // A field is a usable ref/out target unless it is const or readonly; additionally a *struct*
+        // field is writable only through a writable receiver (`readonly Holder h; ref h.Value` is a
+        // readonly location), so that receiver is verified recursively. A class field is not
+        // constrained by its receiver's writability.
+        private static bool IsFieldVariable(
+            SemanticModel semanticModel, IFieldSymbol field, ExpressionSyntax expression, bool requiresWritable,
+            CancellationToken cancellationToken)
+        {
+            if (field.IsConst) return false;
+            if (!requiresWritable) return true;
+            if (field.IsReadOnly) return false;
+            if (field.ContainingType?.IsValueType == true && expression is MemberAccessExpressionSyntax member)
+                return IsVariable(semanticModel, member.Expression, requiresWritable: true, cancellationToken);
+            return true;
         }
 
         private static bool BindsImplicitly(SemanticModel semanticModel, ExpressionSyntax expression, ITypeSymbol type)
