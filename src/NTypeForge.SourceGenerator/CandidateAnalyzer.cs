@@ -611,8 +611,15 @@ namespace NTypeForge.SourceGenerator
                 var paramIndex = parameterIndices[syntaxIndex];
                 if (paramIndex < 0) continue;
                 var parameter = candidate.Parameters[paramIndex];
-                if (parameter.RefKind != RefKind.None &&
-                    !BindsImplicitly(semanticModel, arguments[syntaxIndex].Expression, parameter.Type))
+                if (parameter.RefKind == RefKind.None) continue;
+
+                // Compare the argument's *type* to the parameter (not an expression conversion): a
+                // by-reference argument is a variable, and `out var x` has no expression conversion
+                // yet still binds. A matching type - a struct passthrough, or an out variable of the
+                // parameter type - converts implicitly; a structural-only near-miss (Adder vs ICalc)
+                // does not, and that is the interpretation that would emit a dead forwarding.
+                var argType = semanticModel.GetTypeInfo(arguments[syntaxIndex].Expression, cancellationToken).Type;
+                if (argType != null && !semanticModel.Compilation.ClassifyConversion(argType, parameter.Type).IsImplicit)
                     return true;
             }
             return false;
