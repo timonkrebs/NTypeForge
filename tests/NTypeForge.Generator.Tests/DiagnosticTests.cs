@@ -867,4 +867,71 @@ public class DiagnosticTests
 
         Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
     }
+
+    // No NTF004 when the ref argument is a readonly field: passing a readonly location by `ref` is an
+    // additional compiler error, so the ref duck is not the sole blocker.
+    [Fact]
+    public void NTF004_NotReported_WhenRefArgumentIsReadonlyField()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    private readonly Adder _a = new Adder();
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M() { H(ref _a); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
+
+    // No NTF004 when the ref argument is an `in` parameter (a readonly location): passing it by `ref`
+    // is an additional error, so it is not a sole-blocker near-miss.
+    [Fact]
+    public void NTF004_NotReported_WhenRefArgumentIsInParameter()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M(in Adder a) { H(ref a); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
+
+    // No NTF004 for an inaccessible candidate: a private `H` called from another type fails on
+    // accessibility, an additional compiler error, so the by-ref interface is not the lone blocker.
+    [Fact]
+    public void NTF004_NotReported_WhenCandidateIsInaccessible()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr { private int H(ref ICalc c) => c.Add(1, 2); }
+                public class Caller
+                {
+                    public void M() { var m = new Mgr(); var a = new Adder(); m.H(ref a); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
 }

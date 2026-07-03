@@ -317,6 +317,10 @@ namespace NTypeForge.SourceGenerator
             foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
             {
                 if (candidate.ContainingType == null) continue;
+                // An inaccessible candidate fails on accessibility, not the ref duck, so it is not a
+                // sole-blocker near-miss - skip it (also keeps generated code from naming a member it
+                // could not call).
+                if (!semanticModel.IsAccessible(invocation.SpanStart, candidate)) continue;
                 var arguments = invocation.ArgumentList.Arguments;
                 if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) continue;
 
@@ -361,7 +365,7 @@ namespace NTypeForge.SourceGenerator
         {
             if (parameter.RefKind == RefKind.None || parameter.Type.TypeKind != TypeKind.Interface) return false;
             if (!ArgumentRefKindMatches(argument, parameter.RefKind)) return false;
-            if (!IsAssignableVariable(semanticModel, argument.Expression, cancellationToken)) return false;
+            if (!IsRefKindAssignable(semanticModel, argument.Expression, parameter.RefKind, cancellationToken)) return false;
 
             var argFact = argFacts[syntaxIndex] ??= ComputeArgumentDuckFact(semanticModel, argument.Expression, cancellationToken);
             if (argFact.Type == null || argFact.Underlying == null) return false;
@@ -402,23 +406,31 @@ namespace NTypeForge.SourceGenerator
             SemanticModel semanticModel, ArgumentSyntax argument, IParameterSymbol parameter, CancellationToken cancellationToken)
         {
             if (!ArgumentRefKindMatches(argument, parameter.RefKind)) return false;
-            if (!IsAssignableVariable(semanticModel, argument.Expression, cancellationToken)) return false;
+            if (!IsRefKindAssignable(semanticModel, argument.Expression, parameter.RefKind, cancellationToken)) return false;
             var argType = semanticModel.GetTypeInfo(argument.Expression, cancellationToken).Type;
             return argType != null && SymbolEqualityComparer.Default.Equals(argType, parameter.Type);
         }
 
-        // Whether the expression is an assignable variable, the C# requirement for a ref/out (and
-        // keyword-form in) argument. Rvalues, method/property results, and constants are not, so a
-        // structurally-matching type in one of those positions is a plain ref-variable error rather
-        // than a ducking near-miss.
-        private static bool IsAssignableVariable(SemanticModel semanticModel, ExpressionSyntax expression, CancellationToken cancellationToken)
+        // Whether the expression can be passed with the given by-reference kind. ref/out require a
+        // writable variable (not a readonly field, an in-parameter, or a ref-readonly local); in
+        // accepts any readable variable. Rvalues, method/property results, and constants qualify for
+        // none, so a structurally-matching type in one of those positions is a plain ref-argument
+        // error rather than a ducking near-miss.
+        private static bool IsRefKindAssignable(
+            SemanticModel semanticModel, ExpressionSyntax expression, RefKind refKind, CancellationToken cancellationToken)
         {
+            bool requiresWritable = refKind == RefKind.Ref || refKind == RefKind.Out;
             switch (semanticModel.GetSymbolInfo(expression, cancellationToken).Symbol)
             {
-                case ILocalSymbol local: return !local.IsConst;
-                case IParameterSymbol: return true;
-                case IFieldSymbol field: return !field.IsConst;
-                default: return false;
+                case ILocalSymbol local:
+                    return !local.IsConst && (!requiresWritable || local.RefKind == RefKind.None || local.RefKind == RefKind.Ref);
+                case IParameterSymbol parameter:
+                    return !requiresWritable ||
+                           parameter.RefKind == RefKind.None || parameter.RefKind == RefKind.Ref || parameter.RefKind == RefKind.Out;
+                case IFieldSymbol field:
+                    return !field.IsConst && (!requiresWritable || !field.IsReadOnly);
+                default:
+                    return false;
             }
         }
 
