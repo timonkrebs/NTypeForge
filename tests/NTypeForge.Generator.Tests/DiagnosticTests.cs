@@ -958,4 +958,52 @@ public class DiagnosticTests
 
         Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
     }
+
+    // A mixed site - a ducked by-value argument alongside an unbridgeable ref interface near-miss -
+    // no longer emits a dead forwarding extension (the generated overload would still take the ref
+    // parameter and be uncallable). It is left silent, not rewired.
+    [Fact]
+    public void MixedRefNearMissAndValueDuck_IsNotRewired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public interface ILog { string Log(string m); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Logger { public string Log(string m) => m; }
+                public class Mgr
+                {
+                    public string H(ref ICalc c, ILog l) => l.Log(c.Add(1, 2).ToString());
+                    public void M() { var m = new Mgr(); var a = new Adder(); m.H(ref a, new Logger()); }
+                }
+            }
+            """;
+
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+        Assert.NotEmpty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // No NTF004 for a generic candidate whose type argument can't be inferred: `T H<T>(ref ICalc c)`
+    // called as `m.H(ref a)` also fails on type inference, so the ref duck is not the sole blocker.
+    [Fact]
+    public void NTF004_NotReported_WhenGenericTypeArgumentIsUninferable()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public T H<T>(ref ICalc c) { c.Add(1, 2); return default(T); }
+                    public void M() { var m = new Mgr(); var a = new Adder(); m.H(ref a); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
 }

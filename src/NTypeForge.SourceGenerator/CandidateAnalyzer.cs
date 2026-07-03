@@ -321,6 +321,10 @@ namespace NTypeForge.SourceGenerator
                 // sole-blocker near-miss - skip it (also keeps generated code from naming a member it
                 // could not call).
                 if (!semanticModel.IsAccessible(invocation.SpanStart, candidate)) continue;
+                // A generic candidate whose type arguments were not inferred to concrete types fails
+                // on type inference too (not solely the ref duck), so it is not a sole-blocker
+                // near-miss.
+                if (candidate.IsGenericMethod && candidate.TypeArguments.Any(t => t.TypeKind == TypeKind.TypeParameter)) continue;
                 var arguments = invocation.ArgumentList.Arguments;
                 if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) continue;
 
@@ -586,9 +590,39 @@ namespace NTypeForge.SourceGenerator
                 if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) continue;
 
                 var args = CollectDuckableArgs(semanticModel, candidate, arguments, parameterIndices, argFacts, cancellationToken);
-                if (args.Count > 0) interpretations.Add((candidate, args));
+                if (args.Count > 0 &&
+                    !HasUnbridgeableByRefArgument(semanticModel, candidate, arguments, parameterIndices, args, cancellationToken))
+                    interpretations.Add((candidate, args));
             }
             return interpretations;
+        }
+
+        // A forwarding overload keeps every non-ducked parameter unchanged, so a non-ducked ref/out/in
+        // argument that doesn't already convert to its parameter (e.g. a by-reference interface the
+        // caller hoped to duck) would leave the generated overload uncallable. Such sites are left to
+        // the NTF004 path or to silence rather than emitting a dead extension.
+        private static bool HasUnbridgeableByRefArgument(
+            SemanticModel semanticModel, IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments,
+            IReadOnlyList<int> parameterIndices, List<(int ParamIndex, int SyntaxIndex)> duckedArgs, CancellationToken cancellationToken)
+        {
+            for (int syntaxIndex = 0; syntaxIndex < arguments.Count; syntaxIndex++)
+            {
+                if (ContainsSyntaxIndex(duckedArgs, syntaxIndex)) continue;
+                var paramIndex = parameterIndices[syntaxIndex];
+                if (paramIndex < 0) continue;
+                var parameter = candidate.Parameters[paramIndex];
+                if (parameter.RefKind != RefKind.None &&
+                    !BindsImplicitly(semanticModel, arguments[syntaxIndex].Expression, parameter.Type))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool ContainsSyntaxIndex(List<(int ParamIndex, int SyntaxIndex)> args, int syntaxIndex)
+        {
+            foreach (var arg in args)
+                if (arg.SyntaxIndex == syntaxIndex) return true;
+            return false;
         }
 
         private static List<(int ParamIndex, int SyntaxIndex)> CollectDuckableArgs(
