@@ -393,6 +393,10 @@ namespace NTypeForge.SourceGenerator
             if (parameter.RefKind != RefKind.None)
                 return ByReferenceArgumentBinds(semanticModel, argument, parameter, cancellationToken);
 
+            // A by-value parameter passed with a ref/out/in keyword is a compiler error, so it is not
+            // already bound - the by-ref duck is then not the sole blocker.
+            if (argument.RefKindKeyword.ValueText.Length != 0) return false;
+
             if (BindsImplicitly(semanticModel, expression, parameter.Type)) return true;
 
             // Only a *positional* argument is expanded element-by-element; a named params argument
@@ -612,6 +616,13 @@ namespace NTypeForge.SourceGenerator
                 if (paramIndex < 0) continue;
                 var parameter = candidate.Parameters[paramIndex];
                 if (parameter.RefKind == RefKind.None) continue;
+
+                // ref/out require the caller to write the matching keyword; without it the (unchanged)
+                // by-reference parameter is uncallable in the forwarding. (in is keyword-optional, so
+                // it is judged by type alone below.)
+                if ((parameter.RefKind == RefKind.Ref || parameter.RefKind == RefKind.Out) &&
+                    !ArgumentRefKindMatches(arguments[syntaxIndex], parameter.RefKind))
+                    return true;
 
                 // Compare the argument's *type* to the parameter (not an expression conversion): a
                 // by-reference argument is a variable, and `out var x` has no expression conversion

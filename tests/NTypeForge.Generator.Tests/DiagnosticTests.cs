@@ -1006,4 +1006,50 @@ public class DiagnosticTests
 
         Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
     }
+
+    // A duckable by-value argument next to a non-ducked `ref` argument that lacks the ref keyword
+    // isn't rewired: the forwarding would still require `ref int` and be uncallable.
+    [Fact]
+    public void ValueDuckWithMissingRefKeyword_IsNotRewired()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ICalc c, ref int n) => c.Add(n, n);
+                    public void M() { var m = new Mgr(); int n = 1; m.H(new Adder(), n); }
+                }
+            }
+            """;
+
+        Assert.DoesNotContain("_Proxy_", GeneratorTestHarness.GetGeneratedText(source));
+        Assert.NotEmpty(GeneratorTestHarness.GetEmittedCompileErrors(source));
+    }
+
+    // No NTF004 when a by-value argument carries an erroneous ref keyword: `H(ref ICalc c, int n)`
+    // called as `H(ref adder, ref n)` has a separate compiler error on `n`, so the ref duck is not
+    // the sole blocker.
+    [Fact]
+    public void NTF004_NotReported_WhenByValueArgumentHasRefKeyword()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c, int n) => c.Add(n, n);
+                    public void M() { var m = new Mgr(); var a = new Adder(); int n = 1; m.H(ref a, ref n); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
 }
