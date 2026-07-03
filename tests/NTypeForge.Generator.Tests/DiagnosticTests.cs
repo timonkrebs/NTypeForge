@@ -706,4 +706,96 @@ public class DiagnosticTests
 
         Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
     }
+
+    // No NTF004 when the caller omits the by-reference keyword (`m.H(a)` against `ref ICalc c`): the
+    // by-ref kind is not the sole blocker - the missing keyword is a plain compiler error - so this
+    // is not a ducking near-miss.
+    [Fact]
+    public void NTF004_NotReported_WhenRefKeywordOmitted()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M() { var m = new Mgr(); var a = new Adder(); m.H(a); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
+
+    // No NTF004 when the argument already implements the interface (`Calc : ICalc`): passing it by
+    // `ref` fails only on ref-type invariance, no proxy is involved, so it is not a ducking near-miss.
+    [Fact]
+    public void NTF004_NotReported_WhenArgumentAlreadyImplementsInterface()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Calc : ICalc { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M() { var m = new Mgr(); var a = new Calc(); m.H(ref a); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
+
+    // NTF004 still fires for a near-miss whose call also uses expanded `params` arguments: the params
+    // elements bind against the element type, so the `ref` duck remains the sole blocker.
+    [Fact]
+    public void NTF004_WhenParamsArgumentsBindByElement()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c, params int[] values) => c.Add(values[0], values[1]);
+                    public void M() { var m = new Mgr(); var a = new Adder(); m.H(ref a, 1, 2); }
+                }
+            }
+            """;
+
+        var ntf004 = GeneratorTestHarness.GetGeneratorDiagnostics(source).Single(d => d.Id == "NTF004");
+        Assert.Equal(DiagnosticSeverity.Warning, ntf004.Severity);
+        Assert.Contains("'ref'", ntf004.GetMessage());
+    }
+
+    // A ref/out/in near-miss on an overridden method is reported once, not dropped as ambiguity:
+    // equivalent candidates collapse through DistinctInterpretations rather than counting twice.
+    [Fact]
+    public void NTF004_ReportedOnce_WithOverriddenMethod()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Base { public virtual int H(ref ICalc c) => c.Add(1, 2); }
+                public class Derived : Base { public override int H(ref ICalc c) => c.Add(3, 4); }
+                public class Mgr
+                {
+                    public void M() { var d = new Derived(); var a = new Adder(); d.H(ref a); }
+                }
+            }
+            """;
+
+        Assert.Single(GeneratorTestHarness.GetGeneratorDiagnostics(source).Where(d => d.Id == "NTF004"));
+    }
 }

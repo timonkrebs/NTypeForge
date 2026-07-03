@@ -272,103 +272,157 @@ namespace NTypeForge.SourceGenerator
         // NTF004 - a ref/out/in near-miss. Runs only when the normal duck path found nothing: the
         // argument may still be a *structural* match that simply can't be ducked because its
         // parameter is by-reference (a generated proxy can't be passed by ref/out/in). We surface
-        // that, and only that, as a warning - mirroring NTF003's high-confidence bar: every other
-        // argument must already bind, so the ref kind is the sole blocker, and exactly one candidate
-        // overload may qualify (otherwise the call is genuinely ambiguous and we stay silent).
+        // that, and only that, as a warning - mirroring NTF003's high-confidence bar: the by-ref
+        // kind must be the *sole* blocker (every other argument already binds, the argument was
+        // passed with the matching ref/out/in keyword, and it structurally - but not already
+        // implicitly - satisfies the interface), and, after collapsing equivalent overloads, exactly
+        // one interpretation may qualify. Otherwise the call is genuinely ambiguous, or is a plain
+        // keyword/type error the compiler already explains, so we stay silent.
         private static CandidateModel? TryGetRefKindNearMiss(
             InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo,
             CancellationToken cancellationToken)
         {
             if (invocation.Expression is not MemberAccessExpressionSyntax) return null;
 
-            var arguments = invocation.ArgumentList.Arguments;
-            var argFacts = new ArgumentDuckFact?[arguments.Count];
+            var argFacts = new ArgumentDuckFact?[invocation.ArgumentList.Arguments.Count];
+            var interpretations = DistinctInterpretations(
+                CollectRefKindNearMissInterpretations(invocation, semanticModel, symbolInfo, argFacts, cancellationToken));
+            if (interpretations.Count != 1) return null;
 
-            (IMethodSymbol Candidate, List<DuckedArgSite> Blocked)? only = null;
-            foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
-            {
-                if (candidate.ContainingType == null) continue;
-                var blocked = CollectRefKindNearMiss(semanticModel, candidate, arguments, argFacts, cancellationToken);
-                if (blocked == null) continue;
-                if (only != null) return null; // more than one near-miss interpretation: ambiguous, stay silent
-                only = (candidate, blocked);
-            }
-            if (only == null) return null;
-
-            var (chosen, blockedSites) = only.Value;
-            var target = GetForwardingTarget(invocation, semanticModel, chosen, cancellationToken);
-            if (target == null || ContainsTypeParameter(target) || !IsUsableFromGeneratedTopLevelCode(target))
+            var (candidate, args) = interpretations[0];
+            var target = GetForwardingTarget(invocation, semanticModel, candidate, cancellationToken);
+            if (target == null ||
+                ContainsTypeParameter(target) ||
+                !IsUsableFromGeneratedTopLevelCode(candidate.ContainingType!) ||
+                !IsUsableFromGeneratedTopLevelCode(target))
                 return null;
 
             return BuildModel(
-                invocation, target, blockedSites,
-                isStatic: chosen.IsStatic && !IsExtensionLike(chosen),
+                invocation, target, ResolveRefKindNearMissSites(candidate, args, argFacts),
+                isStatic: candidate.IsStatic && !IsExtensionLike(candidate),
                 isDuckCall: false,
-                originalMethod: chosen);
+                originalMethod: candidate);
         }
 
-        // A candidate overload is a clean ref-kind near-miss when at least one argument maps to a
-        // ref/out/in interface parameter whose underlying type structurally satisfies it, and every
-        // other argument already binds. Returns the blocked sites, or null when it is not such a
-        // near-miss (so the call is left alone with no diagnostic).
-        private static List<DuckedArgSite>? CollectRefKindNearMiss(
-            SemanticModel semanticModel, IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments,
+        // Mirrors CollectDuckableInterpretations, but keeps an overload only when every argument
+        // either already binds or is a ref/out/in interface near-miss - so the by-ref kind is the
+        // sole reason the call fails. Sharing the (ParamIndex, SyntaxIndex) shape lets these run
+        // through DistinctInterpretations, so an override and the base it hides (or a repeated
+        // candidate) collapse to one near-miss instead of being mistaken for ambiguity.
+        private static List<(IMethodSymbol Candidate, List<(int ParamIndex, int SyntaxIndex)> Args)> CollectRefKindNearMissInterpretations(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, SymbolInfo symbolInfo,
             ArgumentDuckFact?[] argFacts, CancellationToken cancellationToken)
         {
-            if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) return null;
+            var interpretations = new List<(IMethodSymbol, List<(int, int)>)>();
+            foreach (var candidate in symbolInfo.CandidateSymbols.OfType<IMethodSymbol>())
+            {
+                if (candidate.ContainingType == null) continue;
+                var arguments = invocation.ArgumentList.Arguments;
+                if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) continue;
 
-            var blocked = new List<DuckedArgSite>();
+                var blocked = CollectRefKindBlockedArgs(semanticModel, candidate, arguments, parameterIndices, argFacts, cancellationToken);
+                if (blocked != null && blocked.Count > 0) interpretations.Add((candidate, blocked));
+            }
+            return interpretations;
+        }
+
+        // The ref/out/in interface arguments of one overload that are clean structural-match
+        // near-misses, or null when the overload is not one (some other argument doesn't bind, or a
+        // by-ref interface argument isn't a clean near-miss - e.g. a missing keyword or an
+        // already-convertible value, both plain compiler errors rather than ducking blockers).
+        private static List<(int ParamIndex, int SyntaxIndex)>? CollectRefKindBlockedArgs(
+            SemanticModel semanticModel, IMethodSymbol candidate, SeparatedSyntaxList<ArgumentSyntax> arguments,
+            IReadOnlyList<int> parameterIndices, ArgumentDuckFact?[] argFacts, CancellationToken cancellationToken)
+        {
+            var blocked = new List<(int, int)>();
             for (int syntaxIndex = 0; syntaxIndex < arguments.Count; syntaxIndex++)
             {
                 var paramIndex = parameterIndices[syntaxIndex];
                 if (paramIndex < 0) return null;
                 var parameter = candidate.Parameters[paramIndex];
-                var expression = arguments[syntaxIndex].Expression;
+                var argument = arguments[syntaxIndex];
 
-                if (IsRefKindInterfaceParameter(parameter))
-                {
-                    var site = TryBuildRefKindBlocker(
-                        semanticModel, candidate, parameter, paramIndex, expression, argFacts, syntaxIndex, cancellationToken);
-                    if (site == null) return null;
-                    blocked.Add(site.Value);
-                }
-                else if (!BindsImplicitly(semanticModel, expression, parameter.Type))
-                {
+                if (IsRefKindBlockedNearMiss(semanticModel, parameter, argument, argFacts, syntaxIndex, cancellationToken))
+                    blocked.Add((paramIndex, syntaxIndex));
+                else if (!ArgumentAlreadyBinds(semanticModel, argument.Expression, parameter))
                     return null;
-                }
             }
-
-            return blocked.Count > 0 ? blocked : null;
+            return blocked;
         }
 
-        private static bool IsRefKindInterfaceParameter(IParameterSymbol parameter)
-            => parameter.RefKind != RefKind.None && parameter.Type.TypeKind == TypeKind.Interface;
-
-        // The argument filling a ref/out/in interface parameter, as a blocked DuckedArgSite, when it
-        // is a clean structural match the generated code could name; otherwise null (which makes the
-        // whole overload a non-near-miss, so NTF004 does not fire on it).
-        private static DuckedArgSite? TryBuildRefKindBlocker(
-            SemanticModel semanticModel, IMethodSymbol candidate, IParameterSymbol parameter, int paramIndex,
-            ExpressionSyntax expression, ArgumentDuckFact?[] argFacts, int syntaxIndex, CancellationToken cancellationToken)
+        // True when this argument fills a ref/out/in interface parameter, was passed with the
+        // matching by-reference keyword, and structurally - but not already implicitly - satisfies
+        // the interface. That is exactly the case that would duck were the parameter by-value, so the
+        // by-ref kind is the only blocker. A missing/mismatched keyword or an already-convertible
+        // value is excluded: no proxy is involved and the compiler's own error is the actionable one.
+        private static bool IsRefKindBlockedNearMiss(
+            SemanticModel semanticModel, IParameterSymbol parameter, ArgumentSyntax argument,
+            ArgumentDuckFact?[] argFacts, int syntaxIndex, CancellationToken cancellationToken)
         {
-            var argFact = argFacts[syntaxIndex] ??= ComputeArgumentDuckFact(semanticModel, expression, cancellationToken);
-            if (argFact.Type == null || argFact.Underlying == null) return null;
-            if (ContainsTypeParameter(argFact.Type) || ContainsTypeParameter(argFact.Underlying) || ContainsTypeParameter(parameter.Type))
-                return null;
-            if (!IsUsableFromGeneratedTopLevelCode(argFact.Underlying) || !IsUsableFromGeneratedTopLevelCode(parameter.Type))
-                return null;
-            if (!StructurallyMatches(parameter.Type, argFact.Underlying))
-                return null;
+            if (parameter.RefKind == RefKind.None || parameter.Type.TypeKind != TypeKind.Interface) return false;
+            if (!ArgumentRefKindMatches(argument, parameter.RefKind)) return false;
 
-            return new DuckedArgSite(
-                argFact.Type, argFact.Underlying, parameter.Type, EmittedParameterIndex(candidate, paramIndex),
-                refKindBlocker: RefKindKeyword(parameter.RefKind), blockedParameterName: parameter.Name);
+            var argFact = argFacts[syntaxIndex] ??= ComputeArgumentDuckFact(semanticModel, argument.Expression, cancellationToken);
+            if (argFact.Type == null || argFact.Underlying == null) return false;
+            if (ContainsTypeParameter(argFact.Type) || ContainsTypeParameter(argFact.Underlying) || ContainsTypeParameter(parameter.Type))
+                return false;
+            if (!IsUsableFromGeneratedTopLevelCode(argFact.Underlying) || !IsUsableFromGeneratedTopLevelCode(parameter.Type))
+                return false;
+            if (BindsImplicitly(semanticModel, argument.Expression, parameter.Type)) return false;
+
+            return StructurallyMatches(parameter.Type, argFact.Underlying);
+        }
+
+        // A non-near-miss argument must already bind for the by-ref kind to be the sole blocker. A
+        // params array parameter also binds in expanded form, where each argument matches the array's
+        // element type rather than the array type itself.
+        private static bool ArgumentAlreadyBinds(SemanticModel semanticModel, ExpressionSyntax expression, IParameterSymbol parameter)
+        {
+            if (BindsImplicitly(semanticModel, expression, parameter.Type)) return true;
+            return parameter.IsParams && parameter.Type is IArrayTypeSymbol array &&
+                   BindsImplicitly(semanticModel, expression, array.ElementType);
         }
 
         private static bool BindsImplicitly(SemanticModel semanticModel, ExpressionSyntax expression, ITypeSymbol type)
         {
             var conversion = semanticModel.ClassifyConversion(expression, type);
             return conversion.Exists && conversion.IsImplicit;
+        }
+
+        // Whether the argument was passed with the by-reference keyword the parameter expects. A
+        // missing or mismatched keyword means the by-ref kind is not the sole blocker (the compiler
+        // reports the keyword error directly), so it is not an NTF004 near-miss. `in` requires the
+        // explicit `in` keyword here to stay conservative, though the language also permits omitting
+        // it.
+        private static bool ArgumentRefKindMatches(ArgumentSyntax argument, RefKind parameterRefKind)
+        {
+            var keyword = argument.RefKindKeyword.ValueText;
+            switch (parameterRefKind)
+            {
+                case RefKind.Ref: return keyword == "ref";
+                case RefKind.Out: return keyword == "out";
+                case RefKind.In: return keyword == "in";
+                default: return false;
+            }
+        }
+
+        // Builds the blocked DuckedArgSites for the single qualifying near-miss interpretation. The
+        // collection pass already verified each argument's facts and utterability, so this only
+        // attaches the ref-kind blocker metadata that drives the NTF004 message.
+        private static List<DuckedArgSite> ResolveRefKindNearMissSites(
+            IMethodSymbol candidate, IReadOnlyList<(int ParamIndex, int SyntaxIndex)> args, ArgumentDuckFact?[] argFacts)
+        {
+            var resolved = new List<DuckedArgSite>(args.Count);
+            foreach (var (paramIndex, syntaxIndex) in args)
+            {
+                var argFact = argFacts[syntaxIndex]!.Value;
+                var parameter = candidate.Parameters[paramIndex];
+                resolved.Add(new DuckedArgSite(
+                    argFact.Type!, argFact.Underlying!, parameter.Type, EmittedParameterIndex(candidate, paramIndex),
+                    refKindBlocker: RefKindKeyword(parameter.RefKind), blockedParameterName: parameter.Name));
+            }
+            resolved.Sort((a, b) => a.EmittedIndex.CompareTo(b.EmittedIndex));
+            return resolved;
         }
 
         // Whether the underlying type structurally satisfies the interface over a fully-proxyable
