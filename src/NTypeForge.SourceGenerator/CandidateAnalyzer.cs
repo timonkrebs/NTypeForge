@@ -344,7 +344,7 @@ namespace NTypeForge.SourceGenerator
 
                 if (IsRefKindBlockedNearMiss(semanticModel, parameter, argument, argFacts, syntaxIndex, cancellationToken))
                     blocked.Add((paramIndex, syntaxIndex));
-                else if (!ArgumentAlreadyBinds(semanticModel, argument.Expression, parameter))
+                else if (!ArgumentAlreadyBinds(semanticModel, argument, parameter, cancellationToken))
                     return null;
             }
             return blocked;
@@ -361,6 +361,7 @@ namespace NTypeForge.SourceGenerator
         {
             if (parameter.RefKind == RefKind.None || parameter.Type.TypeKind != TypeKind.Interface) return false;
             if (!ArgumentRefKindMatches(argument, parameter.RefKind)) return false;
+            if (!IsAssignableVariable(semanticModel, argument.Expression, cancellationToken)) return false;
 
             var argFact = argFacts[syntaxIndex] ??= ComputeArgumentDuckFact(semanticModel, argument.Expression, cancellationToken);
             if (argFact.Type == null || argFact.Underlying == null) return false;
@@ -373,14 +374,52 @@ namespace NTypeForge.SourceGenerator
             return StructurallyMatches(parameter.Type, argFact.Underlying);
         }
 
-        // A non-near-miss argument must already bind for the by-ref kind to be the sole blocker. A
-        // params array parameter also binds in expanded form, where each argument matches the array's
-        // element type rather than the array type itself.
-        private static bool ArgumentAlreadyBinds(SemanticModel semanticModel, ExpressionSyntax expression, IParameterSymbol parameter)
+        // A non-near-miss argument must already bind for the by-ref kind to be the sole blocker.
+        // By-value parameters bind on an implicit conversion (with a positional expanded-params
+        // element checked against the array element type); a by-reference passthrough has stricter
+        // requirements handled by ByReferenceArgumentBinds.
+        private static bool ArgumentAlreadyBinds(
+            SemanticModel semanticModel, ArgumentSyntax argument, IParameterSymbol parameter, CancellationToken cancellationToken)
         {
+            var expression = argument.Expression;
+            if (parameter.RefKind != RefKind.None)
+                return ByReferenceArgumentBinds(semanticModel, argument, parameter, cancellationToken);
+
             if (BindsImplicitly(semanticModel, expression, parameter.Type)) return true;
-            return parameter.IsParams && parameter.Type is IArrayTypeSymbol array &&
+
+            // Only a *positional* argument is expanded element-by-element; a named params argument
+            // (values: x) must supply the whole array, so it is not an element-type match.
+            return argument.NameColon == null && parameter.IsParams &&
+                   parameter.Type is IArrayTypeSymbol array &&
                    BindsImplicitly(semanticModel, expression, array.ElementType);
+        }
+
+        // A by-reference passthrough binds only when the caller used the matching keyword, the
+        // argument is an assignable variable, and its type matches exactly (by-reference parameters
+        // are invariant). Otherwise the argument's own keyword/lvalue/type error is an additional
+        // blocker, so the ref duck is not the sole reason the call fails.
+        private static bool ByReferenceArgumentBinds(
+            SemanticModel semanticModel, ArgumentSyntax argument, IParameterSymbol parameter, CancellationToken cancellationToken)
+        {
+            if (!ArgumentRefKindMatches(argument, parameter.RefKind)) return false;
+            if (!IsAssignableVariable(semanticModel, argument.Expression, cancellationToken)) return false;
+            var argType = semanticModel.GetTypeInfo(argument.Expression, cancellationToken).Type;
+            return argType != null && SymbolEqualityComparer.Default.Equals(argType, parameter.Type);
+        }
+
+        // Whether the expression is an assignable variable, the C# requirement for a ref/out (and
+        // keyword-form in) argument. Rvalues, method/property results, and constants are not, so a
+        // structurally-matching type in one of those positions is a plain ref-variable error rather
+        // than a ducking near-miss.
+        private static bool IsAssignableVariable(SemanticModel semanticModel, ExpressionSyntax expression, CancellationToken cancellationToken)
+        {
+            switch (semanticModel.GetSymbolInfo(expression, cancellationToken).Symbol)
+            {
+                case ILocalSymbol local: return !local.IsConst;
+                case IParameterSymbol: return true;
+                case IFieldSymbol field: return !field.IsConst;
+                default: return false;
+            }
         }
 
         private static bool BindsImplicitly(SemanticModel semanticModel, ExpressionSyntax expression, ITypeSymbol type)

@@ -798,4 +798,73 @@ public class DiagnosticTests
 
         Assert.Single(GeneratorTestHarness.GetGeneratorDiagnostics(source).Where(d => d.Id == "NTF004"));
     }
+
+    // No NTF004 when another by-reference parameter is also mis-passed: `H(ref ICalc c, ref int n)`
+    // called as `H(ref adder, n)` (missing `ref` on n) has a second blocker, so the ref duck is not
+    // the sole reason the call fails.
+    [Fact]
+    public void NTF004_NotReported_WhenAnotherByRefArgumentOmitsKeyword()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c, ref int n) => c.Add(n, n);
+                    public void M() { var m = new Mgr(); var a = new Adder(); int n = 1; m.H(ref a, n); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
+
+    // No NTF004 when the by-reference argument is not an assignable variable: `m.H(ref new Adder())`
+    // structurally matches, but the compiler error is that a ref argument must be a variable - not a
+    // ducking-only blocker.
+    [Fact]
+    public void NTF004_NotReported_WhenBlockedArgumentIsNotAssignable()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M() { var m = new Mgr(); m.H(ref new Adder()); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
+
+    // No NTF004 when a named params argument can't be element-expanded: `H(ref ICalc c, params int[]
+    // values)` called as `H(ref adder, values: 1)` still fails on `values:` needing an int[], so the
+    // ref duck is not the sole blocker.
+    [Fact]
+    public void NTF004_NotReported_WhenParamsArgumentIsNamed()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c, params int[] values) => c.Add(values[0], values[0]);
+                    public void M() { var m = new Mgr(); var a = new Adder(); m.H(ref a, values: 1); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
 }
