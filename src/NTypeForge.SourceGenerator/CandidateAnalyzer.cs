@@ -92,9 +92,31 @@ namespace NTypeForge.SourceGenerator
                accessibility == Accessibility.Internal ||
                accessibility == Accessibility.ProtectedOrInternal;
 
-        private static bool IsEffectivelyPublic(ITypeSymbol type)
+        private static bool IsEffectivelyPublic(ISymbol symbol)
         {
-            for (var current = type; current != null; current = current.ContainingType)
+            switch (symbol)
+            {
+                case IArrayTypeSymbol array:
+                    return IsEffectivelyPublic(array.ElementType);
+                case IPointerTypeSymbol pointer:
+                    return IsEffectivelyPublic(pointer.PointedAtType);
+                case INamedTypeSymbol named:
+                    if (!named.TypeArguments.All(IsEffectivelyPublic)) return false;
+                    return IsContainingTypePublic(named);
+                case IMethodSymbol method:
+                    if (method.DeclaredAccessibility != Accessibility.Public) return false;
+                    if (!IsEffectivelyPublic(method.ReturnType)) return false;
+                    if (!method.Parameters.All(p => IsEffectivelyPublic(p.Type))) return false;
+                    if (!method.TypeArguments.All(IsEffectivelyPublic)) return false;
+                    return IsContainingTypePublic(method);
+                default:
+                    return IsContainingTypePublic(symbol);
+            }
+        }
+
+        private static bool IsContainingTypePublic(ISymbol symbol)
+        {
+            for (var current = symbol; current != null; current = current.ContainingType)
             {
                 if (current.DeclaredAccessibility != Accessibility.Public) return false;
             }
@@ -515,7 +537,9 @@ namespace NTypeForge.SourceGenerator
                 targetNamespace: SymbolNames.NamespaceOf(target),
                 targetMinimalName: SymbolNames.MinimalName(target),
                 targetIsInterface: target.TypeKind == TypeKind.Interface,
-                targetIsPublic: IsEffectivelyPublic(target),
+                targetIsPublic: IsEffectivelyPublic(target)
+                    && duckedArgs.All(a => IsEffectivelyPublic(a.ArgType) && IsEffectivelyPublic(a.UnderlyingType) && IsEffectivelyPublic(a.InterfaceType))
+                    && (originalMethod == null || IsEffectivelyPublic(originalMethod)),
                 duckedArgs: argModels,
                 isStatic: isStatic,
                 isDuckCall: isDuckCall,
