@@ -96,8 +96,25 @@ namespace NTypeForge.SourceGenerator
         {
             for (var current = type; current != null; current = current.ContainingType)
             {
-                if (current.DeclaredAccessibility != Accessibility.Public) return false;
+                if (current.DeclaredAccessibility != Accessibility.Public && current.DeclaredAccessibility != Accessibility.NotApplicable) return false;
             }
+
+            switch (type.TypeKind)
+            {
+                case TypeKind.Array:
+                    return IsEffectivelyPublic(((IArrayTypeSymbol)type).ElementType);
+                case TypeKind.Pointer:
+                    return IsEffectivelyPublic(((IPointerTypeSymbol)type).PointedAtType);
+            }
+
+            if (type is INamedTypeSymbol namedType && namedType.IsGenericType)
+            {
+                foreach (var typeArg in namedType.TypeArguments)
+                {
+                    if (!IsEffectivelyPublic(typeArg)) return false;
+                }
+            }
+
             return true;
         }
 
