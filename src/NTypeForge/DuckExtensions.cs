@@ -65,6 +65,8 @@ public static class DuckExtensions
     /// </exception>
     public static T Duck<T>(this object instance) where T : class
     {
+        ArgumentNullException.ThrowIfNull(instance);
+
         if (instance is T t) return t;
 
         throw new InvalidOperationException("NTypeForge: Duck<T> was called but no proxy was generated. Ensure the NTypeForge source generator is running and the target type matches the interface.");
