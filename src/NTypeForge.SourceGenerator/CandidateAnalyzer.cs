@@ -330,6 +330,20 @@ namespace NTypeForge.SourceGenerator
             return true;
         }
 
+        // Whether the candidate's static/instance form is callable in this invocation's receiver
+        // form. An instance method named through its type (Mgr.H(...)), or a static method through an
+        // instance, is not - so the by-reference type mismatch is not the sole reason the call fails.
+        private static bool ReceiverFormApplies(
+            InvocationExpressionSyntax invocation, SemanticModel semanticModel, IMethodSymbol candidate,
+            CancellationToken cancellationToken)
+        {
+            if (invocation.Expression is not MemberAccessExpressionSyntax memberAccess) return true;
+            var receiver = semanticModel.GetSymbolInfo(memberAccess.Expression, cancellationToken).Symbol;
+            if (receiver is ITypeSymbol or INamespaceSymbol)
+                return candidate.IsStatic;
+            return !candidate.IsStatic || IsExtensionLike(candidate);
+        }
+
         // Mirrors CollectDuckableInterpretations, but keeps an overload only when every argument
         // either already binds or is a ref/out/in interface near-miss - so the by-ref kind is the
         // sole reason the call fails. Sharing the (ParamIndex, SyntaxIndex) shape lets these run
@@ -351,6 +365,10 @@ namespace NTypeForge.SourceGenerator
                 // on type inference too (not solely the ref duck), so it is not a sole-blocker
                 // near-miss.
                 if (candidate.IsGenericMethod && candidate.TypeArguments.Any(t => t.TypeKind == TypeKind.TypeParameter)) continue;
+                // An instance method named through its type (Mgr.H(...)) or a static through an
+                // instance is not callable in this receiver form - a separate error the compiler
+                // folds into the argument mismatch, so it needs an explicit check here.
+                if (!ReceiverFormApplies(invocation, semanticModel, candidate, cancellationToken)) continue;
                 var arguments = invocation.ArgumentList.Arguments;
                 if (!TryMapArgumentsToParameters(arguments, candidate, out var parameterIndices)) continue;
 
