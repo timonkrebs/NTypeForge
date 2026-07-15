@@ -297,11 +297,37 @@ namespace NTypeForge.SourceGenerator
                 !IsUsableFromGeneratedTopLevelCode(target))
                 return null;
 
+            // Sole-blocker gate (authoritative): only explain a call whose *only* compiler errors are
+            // the ducked argument's conversions. Any other error - a missing/extra ref keyword, a
+            // readonly or unassigned location, an inapplicable receiver form, invalid argument
+            // ordering, failed generic inference, inaccessibility, ... - means the by-reference type
+            // mismatch is not the actionable problem, so the compiler's own error stands and we stay
+            // silent. The structural guards above are a cheap first pass; this is the guarantee.
+            if (!RefKindIsSoleBlocker(semanticModel, invocation, cancellationToken)) return null;
+
             return BuildModel(
                 invocation, target, ResolveRefKindNearMissSites(candidate, args, argFacts),
                 isStatic: candidate.IsStatic && !IsExtensionLike(candidate),
                 isDuckCall: false,
                 originalMethod: candidate);
+        }
+
+        // Whether the only errors on the invocation are argument-conversion errors (CS1503/CS1502) -
+        // the ones a proxy would resolve. Any other error code (keyword, lvalue/readonly, definite
+        // assignment, receiver form, argument ordering, generic inference, accessibility, ...) is an
+        // independent blocker, so the by-reference type mismatch is not the sole reason the call
+        // fails and NTF004 would be misleading. Runs once, only after a single near-miss
+        // interpretation has already been isolated, so the GetDiagnostics cost is bounded.
+        private static bool RefKindIsSoleBlocker(
+            SemanticModel semanticModel, InvocationExpressionSyntax invocation, CancellationToken cancellationToken)
+        {
+            foreach (var diagnostic in semanticModel.GetDiagnostics(invocation.Span, cancellationToken))
+            {
+                if (diagnostic.Severity == DiagnosticSeverity.Error &&
+                    diagnostic.Id != "CS1503" && diagnostic.Id != "CS1502")
+                    return false;
+            }
+            return true;
         }
 
         // Mirrors CollectDuckableInterpretations, but keeps an overload only when every argument

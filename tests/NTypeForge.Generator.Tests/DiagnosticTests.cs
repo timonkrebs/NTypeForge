@@ -1052,4 +1052,94 @@ public class DiagnosticTests
 
         Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
     }
+
+    // Sole-blocker gate: no NTF004 when an instance method is invoked through the type name
+    // (`Mgr.H(ref a)`), because the call also fails on the static/instance receiver form.
+    [Fact]
+    public void NTF004_NotReported_WhenInstanceMethodInvokedThroughType()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M() { var a = new Adder(); Mgr.H(ref a); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
+
+    // Sole-blocker gate: no NTF004 when the argument list is itself invalid (a named argument used
+    // out of position, then followed by a positional one), a separate compiler error.
+    [Fact]
+    public void NTF004_NotReported_WhenNamedArgumentOrderingIsInvalid()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(int n, ref ICalc c) => c.Add(n, n);
+                    public void M() { var m = new Mgr(); var a = new Adder(); m.H(c: ref a, 1); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
+
+    // Sole-blocker gate: no NTF004 when the ref argument is a declared-but-unassigned local, since
+    // `ref` on it is also a definite-assignment error.
+    [Fact]
+    public void NTF004_NotReported_WhenRefArgumentIsUnassigned()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public class Mgr
+                {
+                    public int H(ref ICalc c) => c.Add(1, 2);
+                    public void M() { var m = new Mgr(); Adder a; m.H(ref a); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
+
+    // Sole-blocker gate: no NTF004 when a struct field is passed by ref through the implicit receiver
+    // of a readonly member (a readonly location), even though the field access is an identifier the
+    // structural receiver check doesn't recurse into.
+    [Fact]
+    public void NTF004_NotReported_WhenRefArgumentIsFieldViaReadonlyThis()
+    {
+        const string source = """
+            using NTypeForge;
+            namespace T
+            {
+                public interface ICalc { int Add(int a, int b); }
+                public class Adder { public int Add(int a, int b) => a + b; }
+                public struct Box
+                {
+                    private Adder _adder;
+                    public readonly int H(ref ICalc c) => c.Add(1, 2);
+                    public readonly void Run() { this.H(ref _adder); }
+                }
+            }
+            """;
+
+        Assert.Empty(GeneratorTestHarness.GetGeneratorDiagnostics(source));
+    }
 }
