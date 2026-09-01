@@ -6,11 +6,13 @@
   </Configurations>
   <Folder Name="/src/">
     <Project Path="src/NTypeForge.SourceGenerator/NTypeForge.SourceGenerator.csproj" />
+    <Project Path="src/NTypeForge.Variadic.SourceGenerator/NTypeForge.Variadic.SourceGenerator.csproj" />
     <Project Path="src/NTypeForge/NTypeForge.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/NTypeForge.Tests/NTypeForge.Tests.csproj" />
     <Project Path="tests/NTypeForge.Generator.Tests/NTypeForge.Generator.Tests.csproj" />
+    <Project Path="tests/NTypeForge.Variadic.Tests/NTypeForge.Variadic.Tests.csproj" />
   </Folder>
   <Folder Name="/bench/">
     <Project Path="bench/NTypeForge.Benchmarks/NTypeForge.Benchmarks.csproj" />
